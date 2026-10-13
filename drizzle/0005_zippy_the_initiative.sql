@@ -1,0 +1,1 @@
+ALTER TABLE `store_subscriptions` ADD `owner_verified_at` integer;

@@ -1,0 +1,29 @@
+# Generate real local values with bun run setup:local. Never commit .dev.vars.
+BETTER_AUTH_SECRET=replace-with-at-least-32-random-characters
+ENCRYPTION_KEYS='{"v1":"replace-with-base64-32-byte-key"}'
+ENCRYPTION_KEY_ID=v1
+NOTIFICATION_GATEWAY_SECRET=replace-with-at-least-32-random-characters
+WEBHOOK_SECRET=replace-with-at-least-32-random-characters
+OPERATIONS_SECRET=replace-with-at-least-32-random-characters
+# Local end-to-end simulation only, after starting the capture gateway:
+# DELIVERY_ENABLED=true
+
+# Native integrations: use separate development/sandbox credentials when testing.
+# NOTIFICATION_DRIVER=native
+# RESEND_API_KEY=re_...
+# EMAIL_FROM=App <notice@example.jp>
+# RESEND_WEBHOOK_SECRET=whsec_...
+# EXPO_ACCESS_TOKEN=...
+# STORE_PRODUCTS='{"apple":{"jp.example.basic.annual":"basic"},"google":{"basic:annual":"basic"}}'
+# APPLE_BUNDLE_ID=jp.example.app
+# APPLE_APP_ID=123456789
+# APPLE_ENVIRONMENT=Sandbox
+# APPLE_ISSUER_ID=...
+# APPLE_KEY_ID=...
+# APPLE_PRIVATE_KEY=PEM_WITH_ACTUAL_NEWLINES
+# APPLE_ROOT_CERTIFICATES='["BASE64_DER_ROOT"]'
+# GOOGLE_PACKAGE_NAME=jp.example.app
+# GOOGLE_SERVICE_ACCOUNT_EMAIL=billing@example.iam.gserviceaccount.com
+# GOOGLE_PRIVATE_KEY=PEM_WITH_ACTUAL_NEWLINES
+# GOOGLE_PUBSUB_AUDIENCE=https://api.example.jp/webhooks/google
+# GOOGLE_PUBSUB_EMAIL=push@example.iam.gserviceaccount.com

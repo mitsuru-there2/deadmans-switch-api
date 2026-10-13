@@ -1,0 +1,249 @@
+import { and, eq, inArray, lte } from "drizzle-orm";
+import type { Database, Tx } from "../db/client";
+import {
+  entitlements,
+  profiles,
+  recipients,
+  storeSubscriptions,
+  webhookEvents,
+} from "../db/schema";
+import type { Env } from "../env";
+import { hash, Vault } from "../lib/crypto";
+import { AppError, requireValue } from "../lib/errors";
+import {
+  createStoreVerifier,
+  type Store,
+  type StoreVerifier,
+  type VerifiedSubscription,
+  type RestorePurchaseProof,
+} from "../integrations/stores";
+import { DAY, invalidate, log, recipientLimit } from "./switch";
+
+async function aggregate(tx: Tx, profileId: string, now: number) {
+  const p = requireValue((await tx.select().from(profiles).where(eq(profiles.id, profileId)))[0]);
+  const all = await tx
+    .select()
+    .from(storeSubscriptions)
+    .where(eq(storeSubscriptions.profileId, profileId));
+  const valid = all.filter(
+    (s) => ["active", "grace"].includes(s.status) && s.validUntil > now && s.verifiedAt + DAY > now,
+  );
+  valid.sort(
+    (a, b) =>
+      (a.plan === "plus" ? 0 : 1) - (b.plan === "plus" ? 0 : 1) || b.validUntil - a.validUntil,
+  );
+  const best = valid[0];
+  const value = {
+    profileId,
+    plan: best?.plan ?? ("basic" as const),
+    status: best?.status ?? ("expired" as const),
+    validUntil: best ? Math.min(best.validUntil, best.verifiedAt + DAY) : now,
+    sourceVersion: now,
+  };
+  await tx
+    .insert(entitlements)
+    .values(value)
+    .onConflictDoUpdate({ target: entitlements.profileId, set: value });
+  const count = (
+    await tx.select({ id: recipients.id }).from(recipients).where(eq(recipients.profileId, p.id))
+  ).length;
+  if (
+    (!best || count > recipientLimit(best.plan)) &&
+    ["active", "grace", "released"].includes(p.state)
+  )
+    await invalidate(tx, p, "held", now, best ? "recipient_limit" : "entitlement_inactive");
+  await log(tx, p, "store_subscription_verified", now);
+  return value;
+}
+export class BillingService {
+  private vault: Vault;
+  constructor(
+    private db: Database,
+    private env: Env,
+    private verifier: StoreVerifier = createStoreVerifier(env),
+    private now: () => number = Date.now,
+  ) {
+    this.vault = new Vault(env);
+  }
+  async verify(store: Store, reference: string, expectedProfileId?: string, eventId?: string) {
+    const startedAt = this.now();
+    const verified = await this.verifier.verify(store, reference, expectedProfileId);
+    if (expectedProfileId && verified.accountToken !== expectedProfileId)
+      throw new AppError(403, "PURCHASE_ACCOUNT_MISMATCH");
+    return this.apply(verified, startedAt, eventId);
+  }
+  async verifyPurchase(store: Store, reference: string, profileId: string) {
+    const startedAt = this.now();
+    const verified = await this.verifier.verify(store, reference, profileId);
+    if (verified.store !== store || verified.accountToken !== profileId)
+      throw new AppError(403, "PURCHASE_ACCOUNT_MISMATCH");
+    return this.apply(verified, startedAt, undefined, true);
+  }
+  async verifyRestoration(proof: RestorePurchaseProof) {
+    const startedAt = this.now();
+    const verified = await this.verifier.restore(proof);
+    if (verified.store !== proof.store) throw new AppError(403, "PURCHASE_ACCOUNT_MISMATCH");
+    const refs = [
+      verified.reference,
+      ...(verified.linkedReference ? [verified.linkedReference] : []),
+    ];
+    const hashes = await Promise.all(refs.map((ref) => hash(`${verified.store}:${ref}`)));
+    const known = await this.db
+      .select()
+      .from(storeSubscriptions)
+      .where(
+        and(
+          eq(storeSubscriptions.store, verified.store),
+          inArray(storeSubscriptions.referenceHash, hashes),
+        ),
+      );
+    // appAccountToken is chosen by an app, not an identity secret. Never recover by that field alone.
+    if (
+      !known.some((s) => s.ownerVerifiedAt !== null) ||
+      known.some((s) => s.profileId !== verified.accountToken)
+    )
+      throw new AppError(403, "PURCHASE_NOT_REGISTERED");
+    await this.apply(verified, startedAt, undefined, true);
+    if (!["active", "grace"].includes(verified.status) || verified.validUntil <= this.now())
+      throw new AppError(403, "SUBSCRIPTION_REQUIRED");
+    return verified;
+  }
+  private async apply(
+    verified: VerifiedSubscription,
+    startedAt: number,
+    eventId?: string,
+    ownerVerified = false,
+  ) {
+    const referenceHash = await hash(`${verified.store}:${verified.reference}`);
+    const linkedHash = verified.linkedReference
+      ? await hash(`${verified.store}:${verified.linkedReference}`)
+      : undefined;
+    return this.db.transaction(
+      async (tx) => {
+        const p = requireValue(
+          (await tx.select().from(profiles).where(eq(profiles.id, verified.accountToken)))[0],
+          "PURCHASE_ACCOUNT_NOT_FOUND",
+        );
+        if (eventId) {
+          const applied = await tx
+            .insert(webhookEvents)
+            .values({ id: eventId, createdAt: startedAt })
+            .onConflictDoNothing()
+            .returning();
+          if (!applied.length) return { received: true };
+        }
+        const current = (
+          await tx
+            .select()
+            .from(storeSubscriptions)
+            .where(eq(storeSubscriptions.referenceHash, referenceHash))
+        )[0];
+        if (current && current.profileId !== p.id)
+          throw new AppError(403, "PURCHASE_ALREADY_LINKED");
+        // Out-of-order network responses cannot overwrite a newer verification.
+        if (current && current.verifiedAt > startedAt) {
+          // Keep newer store state, but retain proof of the authenticated owner's original binding.
+          if (ownerVerified && current.ownerVerifiedAt === null)
+            await tx
+              .update(storeSubscriptions)
+              .set({ ownerVerifiedAt: startedAt })
+              .where(eq(storeSubscriptions.id, current.id));
+          return { received: true };
+        }
+        const id = current?.id ?? crypto.randomUUID();
+        const values = {
+          id,
+          profileId: p.id,
+          store: verified.store,
+          referenceHash,
+          reference: await this.vault.seal(verified.reference, `subscription:${id}`),
+          productId: verified.productId,
+          plan: verified.plan,
+          status: verified.status,
+          validUntil: verified.validUntil,
+          verifiedAt: startedAt,
+          nextCheckAt: startedAt + 6 * 60 * 60_000,
+          ...(ownerVerified ? { ownerVerifiedAt: startedAt } : {}),
+        };
+        await tx
+          .insert(storeSubscriptions)
+          .values(values)
+          .onConflictDoUpdate({ target: storeSubscriptions.referenceHash, set: values });
+        if (linkedHash) {
+          const prior = (
+            await tx
+              .select()
+              .from(storeSubscriptions)
+              .where(eq(storeSubscriptions.referenceHash, linkedHash))
+          )[0];
+          if (prior && prior.profileId !== p.id) throw new AppError(403, "PURCHASE_ALREADY_LINKED");
+          if (prior)
+            await tx
+              .update(storeSubscriptions)
+              .set({ status: "expired", validUntil: startedAt, verifiedAt: startedAt })
+              .where(eq(storeSubscriptions.id, prior.id));
+        }
+        return aggregate(tx, p.id, startedAt);
+      },
+      { behavior: "immediate" },
+    );
+  }
+  async appleWebhook(signedPayload: string) {
+    const notice = await this.verifier.appleNotification(signedPayload);
+    if (!notice.reference) return;
+    // Refetch current status. A signed historical DID_RENEW must not restore a refunded entitlement.
+    await this.verify("apple", notice.reference, notice.accountToken, `apple:${notice.id}`);
+  }
+  async googleWebhook(token: string, body: unknown) {
+    await this.verifier.googlePushAuthorization(token);
+    const { z } = await import("zod");
+    const message = z
+      .object({ message: z.object({ messageId: z.string(), data: z.string() }) })
+      .parse(body).message;
+    const event = z
+      .object({
+        packageName: z.string(),
+        subscriptionNotification: z.object({ purchaseToken: z.string() }).optional(),
+        testNotification: z.unknown().optional(),
+      })
+      .parse(JSON.parse(atob(message.data)));
+    if (event.packageName !== this.env.GOOGLE_PACKAGE_NAME)
+      throw new AppError(400, "PACKAGE_MISMATCH");
+    if (!event.subscriptionNotification) return;
+    // RTDN is a trigger, not an entitlement. Query subscriptionsv2 for the authoritative state.
+    await this.verify(
+      "google",
+      event.subscriptionNotification.purchaseToken,
+      undefined,
+      `google:${message.messageId}`,
+    );
+  }
+  async refreshDue() {
+    const now = this.now();
+    const due = await this.db
+      .select()
+      .from(storeSubscriptions)
+      .where(
+        and(
+          lte(storeSubscriptions.nextCheckAt, now),
+          inArray(storeSubscriptions.status, ["active", "grace"]),
+        ),
+      )
+      .orderBy(storeSubscriptions.nextCheckAt)
+      .limit(10);
+    for (const s of due) {
+      try {
+        await this.verify(
+          s.store,
+          await this.vault.open<string>(s.reference, `subscription:${s.id}`),
+          s.profileId,
+        );
+      } catch {
+        await this.db
+          .update(storeSubscriptions)
+          .set({ nextCheckAt: now + 300_000 })
+          .where(eq(storeSubscriptions.id, s.id));
+      }
+    }
+  }
+}
