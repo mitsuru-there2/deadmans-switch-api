@@ -30,6 +30,7 @@ import {
 import { parseEnv, type Env } from "./env";
 import { secretEqual, verifySignature } from "./lib/crypto";
 import { DeviceAuthService } from "./services/device-auth";
+import { RestoreOperations } from "./services/restore-operations";
 import { AppError, requireValue } from "./lib/errors";
 import { rateLimit } from "./lib/rate-limit";
 import { dispatch, enqueue, recordResult, type Transport } from "./services/notifications";
@@ -62,6 +63,7 @@ import {
   contactEmailSchema,
   confirmContactSchema,
   restorePurchaseSchema,
+  restoreResultSchema,
 } from "./contracts";
 import { openApiDocument } from "./openapi";
 
@@ -233,6 +235,33 @@ export function createApp(deps: AppDependencies = {}) {
       }
       return c.get("auth").handler(c.req.raw);
     })
+    // A completed restore revokes its source Bearer. This narrow endpoint requires that
+    // exact source credential plus its separate operation secret; it never authenticates general APIs.
+    .post(
+      "/v1/auth/restore/result",
+      validator("json", (value: z.input<typeof restoreResultSchema>) =>
+        restoreResultSchema.parse(value),
+      ),
+      async (c) => {
+        const authorization = c.req.header("Authorization") ?? "";
+        if (!authorization.startsWith("Bearer "))
+          throw new AppError(404, "RESTORE_RESULT_UNAVAILABLE");
+        await rateLimit(
+          c.get("db"),
+          c.req.header("cf-connecting-ip") ?? "local",
+          "restore-result",
+          30,
+          60_000,
+          now(),
+        );
+        return c.json(
+          await new RestoreOperations(c.get("db"), c.get("config"), now).result(
+            authorization.slice(7),
+            c.req.valid("json").operationSecret,
+          ),
+        );
+      },
+    )
     .use("/v1/*", async (c, next) => {
       const authHeaders = new Headers(c.req.raw.headers);
       if (c.req.path === "/v1/devices" && c.req.method === "GET") {
@@ -326,7 +355,7 @@ export function createApp(deps: AppDependencies = {}) {
       async (c) => {
         const deviceToken = c.get("deviceToken");
         if (!deviceToken) throw new AppError(401, "DEVICE_AUTHENTICATION_REQUIRED");
-        const proof = c.req.valid("json");
+        const { operationSecret, ...proof } = c.req.valid("json");
         await rateLimit(
           c.get("db"),
           c.req.header("cf-connecting-ip") ?? "local",
@@ -336,14 +365,24 @@ export function createApp(deps: AppDependencies = {}) {
           now(),
         );
         await rateLimit(c.get("db"), c.get("user").id, "store-restore", 5, 60_000, now());
-        const verified = await billing(c.get("db"), c.get("config")).verifyRestoration(proof);
-        return c.json(
-          await new DeviceAuthService(c.get("db"), c.get("config"), now).restore(
-            c.get("user").id,
-            deviceToken,
-            verified,
-          ),
-        );
+        const operations = new RestoreOperations(c.get("db"), c.get("config"), now);
+        const operation = operationSecret
+          ? await operations.begin(c.get("user").id, deviceToken, operationSecret, proof)
+          : undefined;
+        try {
+          const verified = await billing(c.get("db"), c.get("config")).verifyRestoration(proof);
+          return c.json(
+            await new DeviceAuthService(c.get("db"), c.get("config"), now).restore(
+              c.get("user").id,
+              deviceToken,
+              verified,
+              operation,
+            ),
+          );
+        } catch (error) {
+          if (operation) await operations.fail(operation, error);
+          throw error;
+        }
       },
     )
     .get("/v1/billing/account", async (c) => {

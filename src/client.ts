@@ -14,6 +14,7 @@ export type {
   SubscriptionsResponse,
   DeviceSession,
   BootstrapResponse,
+  RestoreResultResponse,
   CurrentConsent,
   ActivationBlocker,
   DevicesResponse,

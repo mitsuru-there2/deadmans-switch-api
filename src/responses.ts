@@ -133,6 +133,20 @@ export const subscriptionsResponseSchema = z
   .strict();
 export const deviceSessionSchema = z.object({ token: z.string(), expiresAt: time }).strict();
 export const bootstrapResponseSchema = deviceSessionSchema.extend({ accountToken: id, userId: id });
+export const restoreResultResponseSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("pending"), expiresAt: time }).strict(),
+  z
+    .object({
+      status: z.literal("failed"),
+      error: z.object({ code: z.string() }).strict(),
+      expiresAt: time,
+    })
+    .strict(),
+  z
+    .object({ status: z.literal("completed"), session: bootstrapResponseSchema, expiresAt: time })
+    .strict(),
+]);
+export type RestoreResultResponse = z.infer<typeof restoreResultResponseSchema>;
 export const currentConsentSchema = z
   .object({
     version: z.string(),
@@ -174,6 +188,7 @@ const version = z.object({ version: z.number().int() }).strict();
 export const successResponses: Record<string, z.ZodType> = {
   "post /v1/auth/bootstrap": bootstrapResponseSchema,
   "post /v1/auth/restore": bootstrapResponseSchema,
+  "post /v1/auth/restore/result": restoreResultResponseSchema,
   "post /v1/auth/device-session": deviceSessionSchema,
   "post /v1/contact-email": queued,
   "post /v1/contact-email/confirm": z.object({ verified: z.literal(true) }).strict(),

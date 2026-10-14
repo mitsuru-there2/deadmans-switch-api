@@ -32,6 +32,27 @@ export const contactVerifications = sqliteTable("contact_verifications", {
   name: text().notNull(),
   expiresAt: integer("expires_at").notNull(),
 });
+// Source identity is deleted by successful restoration, so only its credential hash is retained.
+export const restoreOperations = sqliteTable(
+  "restore_operations",
+  {
+    id: text().primaryKey(),
+    secretHash: text("secret_hash").notNull().unique(),
+    sourceTokenHash: text("source_token_hash").notNull().unique(),
+    requestHash: text("request_hash").notNull(),
+    state: text({ enum: ["pending", "completed", "failed"] }).notNull(),
+    result: text(),
+    resultTokenHash: text("result_token_hash"),
+    targetUserId: text("target_user_id").references(() => user.id, { onDelete: "cascade" }),
+    errorCode: text("error_code"),
+    expiresAt: integer("expires_at").notNull(),
+    purgeAt: integer("purge_at").notNull(),
+  },
+  (t) => [
+    index("restore_operations_expiry_idx").on(t.expiresAt),
+    index("restore_operations_purge_idx").on(t.purgeAt),
+  ],
+);
 export const session = sqliteTable(
   "session",
   {

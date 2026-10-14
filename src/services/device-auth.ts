@@ -17,6 +17,7 @@ import { AppError, requireValue } from "../lib/errors";
 import { DAY, isEntitled, log } from "./switch";
 import type { VerifiedSubscription } from "../integrations/stores";
 import { enqueue } from "./notifications";
+import { RestoreOperations, type RestoreOperation } from "./restore-operations";
 
 const TOKEN_LIFETIME = 180 * DAY;
 export class DeviceAuthService {
@@ -105,11 +106,23 @@ export class DeviceAuthService {
   async revoke(userId: string) {
     await this.db.delete(deviceCredentials).where(eq(deviceCredentials.userId, userId));
   }
-  async restore(currentUserId: string, currentToken: string, verified: VerifiedSubscription) {
+  async restore(
+    currentUserId: string,
+    currentToken: string,
+    verified: VerifiedSubscription,
+    operation?: RestoreOperation,
+  ) {
     const referenceHash = await hash(`${verified.store}:${verified.reference}`);
     const credentialHash = await hash(currentToken);
     return this.db.transaction(
       async (tx) => {
+        const operations = new RestoreOperations(this.db, this.env, this.now);
+        if (operation) {
+          if (operation.sourceTokenHash !== credentialHash)
+            throw new AppError(404, "RESTORE_RESULT_UNAVAILABLE");
+          const completed = await operations.completed(tx, operation);
+          if (completed) return completed;
+        }
         // Recheck after the external store call: a revoked/rotated temporary token cannot finish a restore.
         const credential = (
           await tx
@@ -187,11 +200,13 @@ export class DeviceAuthService {
             ),
           );
         await log(tx, target, "store_device_restored", this.now());
-        return {
+        const result = {
           ...(await this.issue(tx, target.userId)),
           accountToken: target.id,
           userId: target.userId,
         };
+        if (operation) await operations.complete(tx, operation, result);
+        return result;
       },
       { behavior: "immediate" },
     );

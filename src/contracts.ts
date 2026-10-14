@@ -98,11 +98,23 @@ export const purchaseSchema = z.discriminatedUnion("store", [
 ]);
 
 // Unlike billing verification, restoring private data requires possession of the full proof.
+const operationSecret = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+export const restoreResultSchema = z.object({ operationSecret }).strict();
 export const restorePurchaseSchema = z.discriminatedUnion("store", [
   z
-    .object({ store: z.literal("apple"), signedTransaction: z.string().min(100).max(100_000) })
+    .object({
+      store: z.literal("apple"),
+      signedTransaction: z.string().min(100).max(100_000),
+      operationSecret: operationSecret.optional(),
+    })
     .strict(),
-  z.object({ store: z.literal("google"), purchaseToken: z.string().min(10).max(4096) }).strict(),
+  z
+    .object({
+      store: z.literal("google"),
+      purchaseToken: z.string().min(10).max(4096),
+      operationSecret: operationSecret.optional(),
+    })
+    .strict(),
 ]);
 
 export const receivedResponseSchema = z.union([

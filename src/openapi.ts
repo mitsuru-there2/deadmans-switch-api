@@ -75,6 +75,14 @@ route(
 );
 route(
   "post",
+  "/v1/auth/restore/result",
+  "Read the same restore result within 15 minutes; original fresh Bearer plus operation secret required, never reissues credentials",
+  c.restoreResultSchema,
+  200,
+  [{ bearerAuth: [] }],
+);
+route(
+  "post",
   "/v1/contact-email",
   "Verify warning and recovery email; subscription required",
   c.contactEmailSchema,

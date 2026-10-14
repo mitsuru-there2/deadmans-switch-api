@@ -6,14 +6,15 @@
 
 本人はアプリが自動取得した端末用トークンで認証します。通常のログイン画面は不要です。初回は`POST /v1/auth/bootstrap`へ空のJSON `{}` を送ります。`201`の応答は`{token,expiresAt,accountToken,userId}`です。`token`をExpo SecureStoreに保存し、以後`Authorization: Bearer TOKEN`を送ります。購入前には主要APIを利用できません。
 
-| Method / Path                     | 入力・動作                                                                            |
-| --------------------------------- | ------------------------------------------------------------------------------------- |
-| `POST /v1/auth/bootstrap`         | 認証不要。`{}`。購入用の識別子と端末用トークンを作成。IPごと10回/時                   |
-| `POST /v1/auth/device-session`    | 端末トークンを更新、または確認済みメールの復旧セッションから交換。`{token,expiresAt}` |
-| `DELETE /v1/auth/device-sessions` | 本人の全端末用トークンを失効。204                                                     |
-| `POST /v1/auth/restore`           | 新端末のBearerトークン＋購入証明。元の`{token,expiresAt,accountToken,userId}`を返す   |
-| `POST /v1/contact-email`          | `email,name`。サブスク必須。警告・復旧先の確認メールを送信、3回/日、202               |
-| `POST /v1/contact-email/confirm`  | `token`。登録を始めた端末の認証情報も必須。`{verified:true}`                          |
+| Method / Path                     | 入力・動作                                                                                                |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `POST /v1/auth/bootstrap`         | 認証不要。`{}`。購入用の識別子と端末用トークンを作成。IPごと10回/時                                       |
+| `POST /v1/auth/device-session`    | 端末トークンを更新、または確認済みメールの復旧セッションから交換。`{token,expiresAt}`                     |
+| `DELETE /v1/auth/device-sessions` | 本人の全端末用トークンを失効。204                                                                         |
+| `POST /v1/auth/restore`           | 新端末のBearerトークン＋購入証明。元の`{token,expiresAt,accountToken,userId}`を返す                       |
+| `POST /v1/auth/restore/result`    | 元fresh Bearer＋operationSecret。15分以内の復元結果だけを再取得。詳細は[契約](restore-result-recovery.md) |
+| `POST /v1/contact-email`          | `email,name`。サブスク必須。警告・復旧先の確認メールを送信、3回/日、202                                   |
+| `POST /v1/contact-email/confirm`  | `token`。登録を始めた端末の認証情報も必須。`{verified:true}`                                              |
 
 端末トークンは180日有効です。有効期限内に`device-session`を自動実行して新しいトークンを保存してください。更新は直列に行い、並行したAPIリクエストは保存後のトークンを使います。旧トークンは直ちに失効します。更新応答を失った場合や端末の認証情報が失われた場合は、同じストアの購入を復元します。トークンはURL・ログ・通常のAsyncStorageへ保存しません。トークン更新・購入検証・バックグラウンド通信は本人確認の記録には数えません。
 

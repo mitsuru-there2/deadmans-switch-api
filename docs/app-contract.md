@@ -103,3 +103,7 @@ RevenueCatのサーバー橋渡しについて追加調査とモック実装を[
 Google置換購入は `store_subscriptions.linked_reference_hash` にストア再検証で得た置換元を保存します。復旧は現在購入から保存済みの鎖を辿り、同一ストア・同一所有者の過去の本人購入登録を必須とします。WebhookでB→A、C→Bを検証した場合、本人登録済みAまでCから辿れます。Webhook自体はownerVerifiedAtを設定しません。復旧証明と鎖を検証した復旧処理だけが、従来どおり現在購入へ確認済みの印を記録します。循環・参照変更・異所有者/異ストア・未登録の途中購入・本人登録のない鎖は拒否し、探索は最大256件で打ち切ります。
 
 migration `0007_white_prism.sql` はnullable列の追加だけで、過去の置換関係を推測して埋めません。旧DBの途中購入に関係が残っていない場合は復旧を拒否します。その中間購入をサーバーの既存ストア検証で再照会し、ストアから置換元を再取得できれば鎖が補完されます。再取得できない関係をクライアント申告や同じaccountTokenだけで補いません。今回migrationはメモリ内テストDBだけに適用し、稼働DBや本番の再検証・復旧は実施していません。
+
+## 復元応答喪失の救済
+
+任意の `operationSecret` をPOST /v1/auth/restoreに追加し、元fresh Bearerと同じ秘密による `POST /v1/auth/restore/result` で成功結果を最大15分再取得できます。新しい認証の再発行は行わず、更新/失効した結果は返しません。アプリ側の保存順序、pending/failed/404、放棄時のfresh Bearer失効、保持期限と脅威は[復元結果の再取得契約](restore-result-recovery.md)を参照してください。アプリmain59a6a1b自体には未接続です。

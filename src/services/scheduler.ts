@@ -1,5 +1,6 @@
 import { and, count, eq, gt, inArray, lt, sql } from "drizzle-orm";
 import type { Database } from "../db/client";
+import { purgeRestoreResults } from "./restore-operations";
 import {
   deliveries,
   devices,
@@ -251,6 +252,7 @@ export async function tick(db: Database, env: Env, now = Date.now()) {
   await db.delete(session).where(lt(session.expiresAt, new Date(now)));
   await db.delete(deviceCredentials).where(lt(deviceCredentials.expiresAt, now));
   await db.delete(contactVerifications).where(lt(contactVerifications.expiresAt, now));
+  await purgeRestoreResults(db, now);
   // Erase expired snapshots; do not keep readable content beyond the viewing period.
   await db
     .update(deliveries)
