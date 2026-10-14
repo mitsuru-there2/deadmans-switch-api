@@ -10,6 +10,7 @@ function route(
   body?: z.ZodType,
   status = 200,
   security: unknown[] = [{ bearerAuth: [] }, { cookieAuth: [] }],
+  response?: z.ZodType,
 ) {
   const parameters = [...path.matchAll(/\{(\w+)\}/g)].map((match) => ({
     name: match[1],
@@ -35,7 +36,12 @@ function route(
         }
       : {}),
     responses: {
-      [status]: { description: "Success; see docs/api.md for response details." },
+      [status]: {
+        description: "Success; see docs/api.md for response details.",
+        ...(response
+          ? { content: { "application/json": { schema: z.toJSONSchema(response) } } }
+          : {}),
+      },
       default: {
         description: "Error",
         content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } },
@@ -162,7 +168,15 @@ route(
   "Withdraw or report recipient consent",
   c.withdrawalSchema,
 );
-route("post", "/v1/received", "Read, refuse or report a live release", c.receivedSchema);
+route(
+  "post",
+  "/v1/received",
+  "Preview notice; explicitly confirm death and open, refuse or report a live release",
+  c.receivedSchema,
+  200,
+  [{ bearerAuth: [] }, { cookieAuth: [] }],
+  c.receivedResponseSchema,
+);
 route("post", "/v1/devices", "Register an Expo push token", c.deviceSchema, 201);
 route("delete", "/v1/devices/{id}", "Remove a device", undefined, 204);
 route("post", "/v1/self-test", "Send a fixed test notice only to self", undefined, 202);

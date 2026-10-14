@@ -419,7 +419,14 @@ export function createApp(deps: AppDependencies = {}) {
   app.post("/v1/received", async (c) => {
     const data = receivedSchema.parse(await c.req.json());
     return c.json(
-      await c.get("service").readDelivery(c.get("user").email, data.token, data.action),
+      await c
+        .get("service")
+        .readDelivery(
+          c.get("user").email,
+          data.token,
+          data.action,
+          data.action === "read" ? data : undefined,
+        ),
     );
   });
   app.post("/v1/devices", async (c) => {

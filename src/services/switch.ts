@@ -2,6 +2,7 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database, DbOrTx, Tx } from "../db/client";
 import {
   audit,
+  openingConsents,
   deliveries,
   devices,
   entitlements,
@@ -20,6 +21,9 @@ import { AppError, requireValue } from "../lib/errors";
 import { enqueue } from "./notifications";
 
 export const DAY = 86_400_000;
+export const OPENING_NOTICE_VERSION = "2026-10-14-v1";
+export const OPENING_NOTICE =
+  "この通知は、送信者の死亡を確認したものではありません。送信者が亡くなったことを別の手段で確認してから、伝言を開いてください。この同意は受取人の自己申告であり、公的な死亡確認や受取人認証を代替しません。";
 export const CONSENT_VERSION = "2026-10-13-v1";
 export interface Contact {
   name: string;
@@ -554,7 +558,12 @@ export class SwitchService {
       { behavior: "immediate" },
     );
   }
-  async readDelivery(email: string, token: string, action: "read" | "decline" | "report") {
+  async readDelivery(
+    email: string,
+    token: string,
+    action: "preview" | "read" | "decline" | "report",
+    consent?: { deathConfirmed: true; noticeVersion: string },
+  ) {
     return this.db.transaction(
       async (tx) => {
         const d = requireValue(
@@ -576,7 +585,7 @@ export class SwitchService {
         const p = requireValue(
           (await tx.select().from(profiles).where(eq(profiles.id, release.profileId)))[0],
         );
-        if (action !== "read") {
+        if (action === "decline" || action === "report") {
           await tx
             .update(recipients)
             .set({ status: action === "decline" ? "declined" : "reported" })
@@ -585,6 +594,16 @@ export class SwitchService {
             .update(deliveries)
             .set({ revokedAt: this.now() })
             .where(eq(deliveries.recipientId, r.id));
+          await tx
+            .update(outbox)
+            .set({ state: "cancelled", payload: "" })
+            .where(
+              and(
+                eq(outbox.recipientId, r.id),
+                eq(outbox.kind, "final"),
+                eq(outbox.state, "pending"),
+              ),
+            );
           await log(tx, p, `recipient_${action}`, this.now());
           return { status: action };
         }
@@ -597,12 +616,56 @@ export class SwitchService {
           p.version !== release.version
         )
           throw new AppError(404, "NOT_FOUND");
-        await tx.update(deliveries).set({ viewedAt: this.now() }).where(eq(deliveries.id, d.id));
-        await log(tx, p, "recipient_viewed", this.now());
-        return {
-          message: await this.vault.open<MessageBody>(d.ciphertext, `delivery:${d.id}`),
-          expiresAt: d.expiresAt,
-        };
+        if (action === "preview") {
+          const sender = requireValue(
+            (await tx.select({ name: user.name }).from(user).where(eq(user.id, p.userId)))[0],
+          );
+          return {
+            senderName: sender.name,
+            notice: OPENING_NOTICE,
+            noticeVersion: OPENING_NOTICE_VERSION,
+            expiresAt: d.expiresAt,
+          };
+        }
+        if (action !== "read" || consent?.deathConfirmed !== true)
+          throw new AppError(422, "OPENING_CONSENT_REQUIRED");
+        if (consent.noticeVersion !== OPENING_NOTICE_VERSION)
+          throw new AppError(422, "OPENING_NOTICE_VERSION_REQUIRED");
+        const actor = requireValue(
+          (
+            await tx
+              .select({ id: user.id })
+              .from(user)
+              .where(and(eq(user.email, email.toLowerCase()), eq(user.emailVerified, true)))
+          )[0],
+        );
+        const message = await this.vault.open<MessageBody>(d.ciphertext, `delivery:${d.id}`);
+        // The immediate transaction serializes stop/check-in/withdrawal with opening.
+        // Recheck the clock after asynchronous crypto, before recording consent or disclosure.
+        const snapshotHash = await hash(d.ciphertext);
+        const confirmedAt = this.now();
+        if (d.expiresAt <= confirmedAt) throw new AppError(404, "NOT_FOUND");
+        const inserted = await tx
+          .insert(openingConsents)
+          .values({
+            id: crypto.randomUUID(),
+            userId: actor.id,
+            deliveryId: d.id,
+            releaseId: release.id,
+            recipientId: r.id,
+            messageRevision: d.messageRevision,
+            snapshotHash,
+            noticeVersion: consent.noticeVersion,
+            confirmedAt,
+          })
+          .onConflictDoNothing()
+          .returning({ id: openingConsents.id });
+        if (inserted.length) await log(tx, p, "recipient_opening_consented", confirmedAt);
+        await tx
+          .update(deliveries)
+          .set({ viewedAt: d.viewedAt ?? confirmedAt })
+          .where(eq(deliveries.id, d.id));
+        return { message, expiresAt: d.expiresAt };
       },
       { behavior: "immediate" },
     );

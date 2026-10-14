@@ -212,6 +212,7 @@ export async function tick(db: Database, env: Env, now = Date.now()) {
               id,
               releaseId,
               recipientId: r.id,
+              messageRevision: m.revision,
               ciphertext: await vault.seal(body, `delivery:${id}`),
               tokenHash: await hash(token),
               expiresAt,

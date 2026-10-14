@@ -188,11 +188,44 @@ export const deliveries = sqliteTable(
       .references(() => recipients.id, { onDelete: "cascade" }),
     ciphertext: text().notNull(),
     tokenHash: text("token_hash").notNull().unique(),
+    messageRevision: integer("message_revision"),
     expiresAt: integer("expires_at").notNull(),
     viewedAt: integer("viewed_at"),
     revokedAt: integer("revoked_at"),
   },
   (t) => [uniqueIndex("release_recipient_unique").on(t.releaseId, t.recipientId)],
+);
+// A delivery is an immutable snapshot. Its hash also identifies legacy snapshots
+// created before messageRevision was recorded.
+export const openingConsents = sqliteTable(
+  "opening_consents",
+  {
+    id: text().primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    deliveryId: text("delivery_id")
+      .notNull()
+      .references(() => deliveries.id, { onDelete: "cascade" }),
+    releaseId: text("release_id")
+      .notNull()
+      .references(() => releases.id, { onDelete: "cascade" }),
+    recipientId: text("recipient_id")
+      .notNull()
+      .references(() => recipients.id, { onDelete: "cascade" }),
+    messageRevision: integer("message_revision"),
+    snapshotHash: text("snapshot_hash").notNull(),
+    noticeVersion: text("notice_version").notNull(),
+    confirmedAt: integer("confirmed_at").notNull(),
+  },
+  (t) => [
+    uniqueIndex("opening_consent_unique").on(
+      t.deliveryId,
+      t.userId,
+      t.snapshotHash,
+      t.noticeVersion,
+    ),
+  ],
 );
 export const outbox = sqliteTable(
   "outbox",

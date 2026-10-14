@@ -94,14 +94,20 @@ ExpoのUniversal Links / App Linksを`TRUSTED_ORIGINS`へ設定します。任�
 
 招待URLは`RECIPIENT_WEB_URL/invitations#TOKEN`、最終通知URLは`RECIPIENT_WEB_URL/receive#TOKEN`です。フラグメントをWebクライアントで読み、APIのJSON本文へ渡します。フロントエンドはログインを挟んでフラグメントを安全に保持し、解析・Referer・サーバーログへ流さないでください。このリポジトリはAPIのみなので、これらのWeb画面は別途必要です。
 
-| Method / Path                              | JSON入力                                                                    |
-| ------------------------------------------ | --------------------------------------------------------------------------- |
-| `POST /v1/invitations/preview`             | `token`。一致するメールの受信者に送信者名・宛先ID・チャネル・招待期限を返す |
-| `POST /v1/invitations/respond`             | `token,action:"accept"/"decline"/"report"`。招待は7日有効・一回限り         |
-| `POST /v1/recipient-consents/:id/withdraw` | `action:"decline"/"report"`。承諾後、最終通知前でも辞退できる               |
-| `POST /v1/received`                        | `token,action:"read"/"decline"/"report"`。readは省略可                      |
+| Method / Path                              | JSON入力                                                                                              |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `POST /v1/invitations/preview`             | `token`。一致するメールの受信者に送信者名・宛先ID・チャネル・招待期限を返す                           |
+| `POST /v1/invitations/respond`             | `token,action:"accept"/"decline"/"report"`。招待は7日有効・一回限り                                   |
+| `POST /v1/recipient-consents/:id/withdraw` | `action:"decline"/"report"`。承諾後、最終通知前でも辞退できる                                         |
+| `POST /v1/received`                        | `token,action:"preview"/"read"/"decline"/"report"`。readには`deathConfirmed:true,noticeVersion`が必須 |
 
 受取承諾は招待先メールの認証で行います。SMS・電話番号の受付は次期フェーズ対応です。
+
+開封前は`{token,action:"preview"}`で`{senderName,notice,noticeVersion,expiresAt}`のみ取得します。件名・本文・抜粋は含まれず、同意も記録されません。注意文を表示し、受取人が別手段で死亡を確認したと明示操作したときだけ`{token,action:"read",deathConfirmed:true,noticeVersion:"2026-10-14-v1"}`を送ります。事前の受取承諾とこの開封同意は別です。
+
+`action`省略、同意欠落/false、未定義入力は`400 INVALID_REQUEST`、旧注意文版は`422 OPENING_NOTICE_VERSION_REQUIRED`。GETや認証完了で開示しません。各readで明示同意が必要で、過去の同意は失効を迂回しません。同意は認証済み受取人・公開イベント・宛先・固定本文版・注意文版とサーバー時刻に紐付けます。移行前の固定本文はrevisionがnullですが、暗号化スナップショットのハッシュで識別します。
+
+停止・チェックイン・辞退と開封はimmediateトランザクションで直列化します。先にコミットした停止は開示を拒否します。開封が先にコミットした場合の取得済み内容は回収できません。受取Webは本文を先読みせず、フラグメントのトークンをログ・解析へ出さないでください。
 
 閲覧成功は`{"message":{"title":"...","body":"..."},"expiresAt":...}`です。トークンだけ・別人のメール・期限切れ・停止済み・拒否済みでは閲覧できません。同意撤回時は所有者の監視を保留します。公開後の拒否・通報は当該受信者の閲覧・未送信通知を失効します。本文の理解や対応を保証する閲覧証明ではありません。
 

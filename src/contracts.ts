@@ -46,9 +46,18 @@ export const invitationSchema = z
   .strict();
 export const previewSchema = z.object({ token: tokenSchema }).strict();
 export const withdrawalSchema = z.object({ action: z.enum(["decline", "report"]) }).strict();
-export const receivedSchema = z
-  .object({ token: tokenSchema, action: z.enum(["read", "decline", "report"]).default("read") })
-  .strict();
+export const receivedSchema = z.discriminatedUnion("action", [
+  z.object({ token: tokenSchema, action: z.literal("preview") }).strict(),
+  z
+    .object({
+      token: tokenSchema,
+      action: z.literal("read"),
+      deathConfirmed: z.literal(true),
+      noticeVersion: z.string().min(1).max(100),
+    })
+    .strict(),
+  z.object({ token: tokenSchema, action: z.enum(["decline", "report"]) }).strict(),
+]);
 export const deviceSchema = z
   .object({
     token: z
@@ -95,3 +104,23 @@ export const restorePurchaseSchema = z.discriminatedUnion("store", [
     .strict(),
   z.object({ store: z.literal("google"), purchaseToken: z.string().min(10).max(4096) }).strict(),
 ]);
+
+export const receivedResponseSchema = z.union([
+  z
+    .object({
+      senderName: z.string(),
+      notice: z.string(),
+      noticeVersion: z.string(),
+      expiresAt: z.number(),
+    })
+    .strict(),
+  z
+    .object({
+      message: z.object({ title: z.string(), body: z.string() }).strict(),
+      expiresAt: z.number(),
+    })
+    .strict(),
+  z.object({ status: z.enum(["decline", "report"]) }).strict(),
+]);
+export type ReceivedRequest = z.infer<typeof receivedSchema>;
+export type ReceivedResponse = z.infer<typeof receivedResponseSchema>;

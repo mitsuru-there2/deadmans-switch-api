@@ -10,7 +10,7 @@ import {
 } from "../src/db/schema";
 import { dispatch, type Notice, recordResult } from "../src/services/notifications";
 import { probe, tick } from "../src/services/scheduler";
-import { CONSENT_VERSION, DAY } from "../src/services/switch";
+import { CONSENT_VERSION, OPENING_NOTICE_VERSION, DAY } from "../src/services/switch";
 import { fixture, type Fixture } from "./helpers";
 let f: Fixture;
 beforeEach(async () => {
@@ -166,7 +166,13 @@ describe("dead man's switch invariants", () => {
     await expect(f.service.readDelivery("attacker@example.jp", token, "read")).rejects.toThrow(
       "NOT_FOUND",
     );
-    expect(await f.service.readDelivery("family@example.jp", token, "read")).toMatchObject({
+    await f.createUser("family@example.jp");
+    expect(
+      await f.service.readDelivery("family@example.jp", token, "read", {
+        deathConfirmed: true,
+        noticeVersion: OPENING_NOTICE_VERSION,
+      }),
+    ).toMatchObject({
       message: { body: "家族への機密メッセージ" },
     });
     await f.service.readDelivery("family@example.jp", token, "decline");
