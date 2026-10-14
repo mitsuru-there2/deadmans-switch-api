@@ -1,6 +1,14 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test, spyOn } from "bun:test";
 import { eq } from "drizzle-orm";
-import { deliveries, openingConsents, outbox, profiles, user } from "../src/db/schema";
+import {
+  deliveries,
+  entitlements,
+  openingConsents,
+  outbox,
+  profiles,
+  systemHealth,
+  user,
+} from "../src/db/schema";
 import { receivedResponseSchema } from "../src/contracts";
 import { type Notice } from "../src/services/notifications";
 import { tick } from "../src/services/scheduler";
@@ -39,6 +47,72 @@ async function noDisclosure(response: Response, status: number) {
   expect(body).not.toContain("家族への機密メッセージ");
   expect(body).not.toContain('"message"');
 }
+
+for (const stop of [
+  "expired",
+  "revoked",
+  "missing",
+  "kill-switch",
+  "stale-monitor",
+  "incident",
+] as const) {
+  test(`released links fail closed before Cron observes ${stop}`, async () => {
+    const { owner, recipient, token } = await release();
+    expect((await f.request("/v1/received", "POST", read(token), recipient.token)).status).toBe(
+      200,
+    );
+    const before = (await f.db.select().from(deliveries))[0]!;
+    if (stop === "expired")
+      await f.db
+        .update(entitlements)
+        .set({ validUntil: f.now() })
+        .where(eq(entitlements.profileId, owner.profile.id));
+    if (stop === "revoked")
+      await f.db
+        .update(entitlements)
+        .set({ status: "revoked" })
+        .where(eq(entitlements.profileId, owner.profile.id));
+    if (stop === "missing")
+      await f.db.delete(entitlements).where(eq(entitlements.profileId, owner.profile.id));
+    if (stop === "kill-switch") f.env.DELIVERY_ENABLED = "false";
+    if (stop === "stale-monitor") f.advance(300_001);
+    if (stop === "incident") await f.db.update(systemHealth).set({ incidentAt: f.now() });
+    expect((await f.service.profile(owner.id)).state).toBe("released");
+    for (const body of [read(token), { token, action: "preview" }])
+      await noDisclosure(await f.request("/v1/received", "POST", body, recipient.token), 404);
+    expect(await f.db.select().from(openingConsents)).toHaveLength(1);
+    expect((await f.db.select().from(deliveries))[0]!.viewedAt).toBe(before.viewedAt);
+    expect(
+      (await f.request("/v1/received", "POST", { token, action: "decline" }, recipient.token))
+        .status,
+    ).toBe(200);
+  });
+}
+
+test("entitlement expiring during snapshot decryption prevents disclosure and rolls back consent", async () => {
+  const { owner, recipient, token } = await release();
+  await f.db
+    .update(entitlements)
+    .set({ validUntil: f.now() + 1 })
+    .where(eq(entitlements.profileId, owner.profile.id));
+  const original = f.service.vault.open.bind(f.service.vault);
+  const mocked = spyOn(f.service.vault, "open").mockImplementation(
+    async <T>(ciphertext: string, context: string): Promise<T> => {
+      const value = await original<T>(ciphertext, context);
+      if (context.startsWith("delivery:")) f.advance(1);
+      return value;
+    },
+  );
+  try {
+    await expect(f.service.readDelivery(recipient.email, token, "read", consent)).rejects.toThrow(
+      "NOT_FOUND",
+    );
+  } finally {
+    mocked.mockRestore();
+  }
+  expect(await f.db.select().from(openingConsents)).toHaveLength(0);
+  expect((await f.db.select().from(deliveries))[0]!.viewedAt).toBeNull();
+});
 
 test("preview and scanner GET never disclose, decrypt the snapshot or record opening consent", async () => {
   const { recipient, token, notice } = await release();

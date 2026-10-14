@@ -46,7 +46,7 @@ bunx wrangler secret put OPERATIONS_SECRET --env production
 
 信頼できる環境で東京DB用の`TURSO_DATABASE_URL`と`TURSO_AUTH_TOKEN`を注入し、`bun run db:migrate`を実行します。その後`bun run check`、`bun run build`、`bun run deploy`でデプロイします。デプロイコマンド自身はDB作成・マイグレーション・Secrets作成を行いません。
 
-本番は`DELIVERY_ENABLED=false`でも復旧・受信者認証・連絡先確認・招待・自分宛テストは送られます。停止スイッチの対象は自動監視の警告・日常プッシュ・最終通知です。外部通知を全面停止する場合はCronの配信処理も停止し、Resend・Expoの送信資格情報を無効化してください。
+本番は`DELIVERY_ENABLED=false`でも復旧・受信者認証・連絡先確認・招待・自分宛テストは送られます。停止スイッチの対象は自動監視の警告・日常プッシュ・最終通知です。Cronは公開済みを含む監視を保留してリンクを失効させます。受取APIのpreview/readもCronを待たずに停止スイッチ・所有者の内部entitlement有効期限/状態・監視の最終tick/probe（5分以内）とincidentを同一トランザクション内で検査し、停止中は404で開示を拒否します。復号後と返却直前も期限を再検査します。受取人の辞退・通報は停止中も受け付けます。外部通知を全面停止する場合はCronの配信処理も停止し、Resend・Expoの送信資格情報を無効化してください。
 
 ## 状態と取消境界
 

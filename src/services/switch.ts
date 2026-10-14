@@ -639,10 +639,34 @@ export class SwitchService {
           p.version !== release.version
         )
           throw new AppError(404, "NOT_FOUND");
+        const entitlement = (
+          await tx.select().from(entitlements).where(eq(entitlements.profileId, p.id))
+        )[0];
+        const health = (
+          await tx.select().from(systemHealth).where(eq(systemHealth.id, "scheduler"))
+        )[0];
+        // Do not wait for Cron to convert a released profile into a hold.
+        // All rows are read in the same immediate transaction as the opening decision.
+        const requireDisclosure = () => {
+          const now = this.now();
+          if (
+            d.expiresAt <= now ||
+            !isEntitled(entitlement, now) ||
+            this.env.DELIVERY_ENABLED !== "true" ||
+            !health?.lastTickAt ||
+            !health.lastProbeAt ||
+            now - health.lastTickAt > 300_000 ||
+            now - health.lastProbeAt > 300_000 ||
+            health.incidentAt
+          )
+            throw new AppError(404, "NOT_FOUND");
+        };
+        requireDisclosure();
         if (action === "preview") {
           const sender = requireValue(
             (await tx.select({ name: user.name }).from(user).where(eq(user.id, p.userId)))[0],
           );
+          requireDisclosure();
           return {
             senderName: sender.name,
             notice: OPENING_NOTICE,
@@ -667,7 +691,7 @@ export class SwitchService {
         // Recheck the clock after asynchronous crypto, before recording consent or disclosure.
         const snapshotHash = await hash(d.ciphertext);
         const confirmedAt = this.now();
-        if (d.expiresAt <= confirmedAt) throw new AppError(404, "NOT_FOUND");
+        requireDisclosure();
         const inserted = await tx
           .insert(openingConsents)
           .values({
@@ -688,7 +712,7 @@ export class SwitchService {
           .update(deliveries)
           .set({ viewedAt: d.viewedAt ?? confirmedAt })
           .where(eq(deliveries.id, d.id));
-        if (d.expiresAt <= this.now()) throw new AppError(404, "NOT_FOUND");
+        requireDisclosure();
         return { message, expiresAt: d.expiresAt };
       },
       { behavior: "immediate" },
