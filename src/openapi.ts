@@ -184,6 +184,14 @@ route(
   [{ bearerAuth: [] }, { cookieAuth: [] }],
   c.receivedResponseSchema,
 );
+route(
+  "get",
+  "/v1/devices",
+  "List own push registrations (id and createdAt only); owner Bearer required",
+  undefined,
+  200,
+  [{ bearerAuth: [] }],
+);
 route("post", "/v1/devices", "Register an Expo push token", c.deviceSchema, 201);
 route("delete", "/v1/devices/{id}", "Remove a device", undefined, 204);
 route("post", "/v1/self-test", "Send a fixed test notice only to self", undefined, 202);

@@ -165,6 +165,10 @@ export const exportResponseSchema = z
     messages: z.array(messageResponseSchema),
   })
   .strict();
+export const devicesResponseSchema = z
+  .object({ devices: z.array(z.object({ id, createdAt: time }).strict()) })
+  .strict();
+export type DevicesResponse = z.infer<typeof devicesResponseSchema>;
 const queued = z.object({ queued: z.literal(true) }).strict();
 const version = z.object({ version: z.number().int() }).strict();
 export const successResponses: Record<string, z.ZodType> = {
@@ -210,7 +214,11 @@ export const successResponses: Record<string, z.ZodType> = {
   "post /v1/received": receivedResponseSchema,
   "get /v1/billing/account": billingAccountSchema,
   "get /v1/billing/subscriptions": subscriptionsResponseSchema,
-  "post /v1/billing/verify": entitlementSchema,
+  "post /v1/billing/verify": z.union([
+    entitlementSchema,
+    z.object({ received: z.literal(true) }).strict(),
+  ]),
+  "get /v1/devices": devicesResponseSchema,
   "post /v1/devices": z.object({ id }).strict(),
   "post /v1/self-test": selfTestResponseSchema,
   "get /v1/deliveries": deliveriesResponseSchema,

@@ -1,3 +1,4 @@
+import { storeAccountMatches } from "./store-account";
 import type { SignedDataVerifier } from "@apple/app-store-server-library";
 import { createRemoteJWKSet, importPKCS8, jwtVerify, SignJWT } from "jose";
 import { z } from "zod";
@@ -266,7 +267,10 @@ export function createStoreVerifier(env: Env, http: HttpClient = fetch): StoreVe
       throw new AppError(response.status === 404 ? 422 : 503, "GOOGLE_VERIFICATION_FAILED");
     const raw = googlePurchaseSchema.parse(await response.json());
     const result = normalizeGooglePurchase(raw, reference, env);
-    if (expectedAccountToken && result.accountToken !== expectedAccountToken)
+    if (
+      expectedAccountToken &&
+      !(await storeAccountMatches("google", result.accountToken, expectedAccountToken))
+    )
       throw new AppError(403, "PURCHASE_ACCOUNT_MISMATCH");
     // Acknowledge only verified, entitled subscriptions. Never trust a client-side flag.
     if (

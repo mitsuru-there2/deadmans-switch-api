@@ -17,6 +17,7 @@ import {
   type VerifiedSubscription,
   type RestorePurchaseProof,
 } from "../integrations/stores";
+import { storeAccountMatches } from "../integrations/store-account";
 import { DAY, invalidate, log, recipientLimit } from "./switch";
 
 async function aggregate(tx: Tx, profileId: string, now: number) {
@@ -67,16 +68,16 @@ export class BillingService {
   }
   async verify(store: Store, reference: string, expectedProfileId?: string, eventId?: string) {
     const startedAt = this.now();
-    const verified = await this.verifier.verify(store, reference, expectedProfileId);
-    if (expectedProfileId && verified.accountToken !== expectedProfileId)
-      throw new AppError(403, "PURCHASE_ACCOUNT_MISMATCH");
+    const raw = await this.verifier.verify(store, reference, expectedProfileId);
+    if (raw.store !== store) throw new AppError(403, "PURCHASE_ACCOUNT_MISMATCH");
+    const verified = await this.resolveOwner(raw, expectedProfileId);
     return this.apply(verified, startedAt, eventId);
   }
   async verifyPurchase(store: Store, reference: string, profileId: string) {
     const startedAt = this.now();
-    const verified = await this.verifier.verify(store, reference, profileId);
-    if (verified.store !== store || verified.accountToken !== profileId)
-      throw new AppError(403, "PURCHASE_ACCOUNT_MISMATCH");
+    const raw = await this.verifier.verify(store, reference, profileId);
+    if (raw.store !== store) throw new AppError(403, "PURCHASE_ACCOUNT_MISMATCH");
+    const verified = await this.resolveOwner(raw, profileId);
     return this.apply(verified, startedAt, undefined, true);
   }
   async verifyRestoration(proof: RestorePurchaseProof) {
@@ -97,15 +98,60 @@ export class BillingService {
           inArray(storeSubscriptions.referenceHash, hashes),
         ),
       );
-    // appAccountToken is chosen by an app, not an identity secret. Never recover by that field alone.
+    // Recover the owner only from the registered purchase proof, never from a raw/hash account ID alone.
+    const profileId = known[0]?.profileId;
     if (
+      !profileId ||
       !known.some((s) => s.ownerVerifiedAt !== null) ||
-      known.some((s) => s.profileId !== verified.accountToken)
+      known.some((s) => s.profileId !== profileId) ||
+      !(await storeAccountMatches(verified.store, verified.accountToken, profileId))
     )
       throw new AppError(403, "PURCHASE_NOT_REGISTERED");
-    await this.apply(verified, startedAt, undefined, true);
+    const normalized = { ...verified, accountToken: profileId };
+    await this.apply(normalized, startedAt, undefined, true);
     if (!["active", "grace"].includes(verified.status) || verified.validUntil <= this.now())
       throw new AppError(403, "SUBSCRIPTION_REQUIRED");
+    return normalized;
+  }
+  private async resolveOwner(verified: VerifiedSubscription, expectedProfileId?: string) {
+    if (expectedProfileId) {
+      if (!(await storeAccountMatches(verified.store, verified.accountToken, expectedProfileId)))
+        throw new AppError(403, "PURCHASE_ACCOUNT_MISMATCH");
+      return { ...verified, accountToken: expectedProfileId };
+    }
+    if (verified.store === "apple") return verified;
+    const references = [
+      verified.reference,
+      ...(verified.linkedReference ? [verified.linkedReference] : []),
+    ];
+    const hashes = await Promise.all(references.map((ref) => hash(`google:${ref}`)));
+    const known = await this.db
+      .select()
+      .from(storeSubscriptions)
+      .where(
+        and(
+          eq(storeSubscriptions.store, "google"),
+          inArray(storeSubscriptions.referenceHash, hashes),
+        ),
+      );
+    const profileId = known[0]?.profileId;
+    if (profileId) {
+      if (
+        known.some((s) => s.profileId !== profileId) ||
+        !(await storeAccountMatches("google", verified.accountToken, profileId))
+      )
+        throw new AppError(403, "PURCHASE_ACCOUNT_MISMATCH");
+      return { ...verified, accountToken: profileId };
+    }
+    // Preserve existing direct-ID webhooks. An unknown hash cannot locate an owner;
+    // the authenticated first purchase verification must establish its binding first.
+    const direct = (
+      await this.db
+        .select({ id: profiles.id })
+        .from(profiles)
+        .where(eq(profiles.id, verified.accountToken))
+    )[0];
+    if (!direct) throw new AppError(403, "PURCHASE_NOT_REGISTERED");
     return verified;
   }
   private async apply(

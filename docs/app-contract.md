@@ -36,19 +36,57 @@ bootstrap `{}` → `{token,expiresAt,accountToken,userId}`。端末Bearerは180�
 
 編集は最新versionを送信、409で自動上書きせず利用者に確認。招待・テスト・削除・有効化は応答喪失を未実行と断定せず状態照合。汎用冪等性キーは未提供です。オフラインチェックインをバックグラウンド再送しません。
 
-## RevenueCat：接続の未解決点
+## RevenueCat と既存ストア検証を接続する最小構成
 
-アプリにインストールされた `react-native-purchases 10.13.0` の実際の型を読込確認しました（`@revenuecat/purchases-typescript-internal/dist/{callbackTypes,customerInfo}.d.ts`）。MakePurchaseResult.transactionはtransactionIdentifierとAndroid purchaseTokenを持ちますが、purchaseTokenはnull許容です。Appleの署名付きJWSはこの型にありません。restorePurchasesはCustomerInfoだけを返すため、これをAPI復旧証明に置換できません。
+権利の正は引き続きストアを直接再検証する API です。CustomerInfo、RevenueCat appUserID、注文番号だけで権利付与・復旧しません。新認証方式・本番設定は追加していません。
 
-AndroidのRevenueCatネイティブ実装はappUserIDのSHA-256をobfuscatedAccountIdに設定します。現APIはprofile UUIDそのものとの厳密一致であり、`appUserID=accountToken` だけでは一致しません。注文番号をpurchaseTokenとして送ることもできません。参照: [公式Android実装](https://github.com/RevenueCat/purchases-android/blob/main/purchases/src/main/kotlin/com/revenuecat/purchases/google/BillingWrapper.kt)、[公式SDK型](https://github.com/RevenueCat/purchases-hybrid-common/blob/main/typescript/src/customerInfo.ts)、[React Native SDK](https://github.com/RevenueCat/react-native-purchases/blob/main/src/purchases.ts)。ネイティブ実装mainの確認は、対象ビルドに固定された依存版での実機検証を代替しません。
+アプリに入っている `react-native-purchases 10.13.0` の型と依存を確認しました。MakePurchaseResult.transaction の `transactionIdentifier` は両OS、`purchaseToken` はAndroid用（null許容）です。`restorePurchases()` は CustomerInfo のみで、Apple署名JWSを返しません。依存は PurchasesHybridCommon 19.11.0 → iOS 5.95.0 / Android 10.27.0 です。iOS版は UUID の appUserID を StoreKit 2 の appAccountToken に設定し、Android版は SHA-256(appUserID) を obfuscatedAccountId に設定します。Androidの置換購入では設定を省略する場合があり、実ストアの応答に所有者識別子がない場合は API が拒否します。危険なSDK設定で回避しません。
 
-最小の安全な候補は、APIの直接検証を正のまま保持し、必要なネイティブストア証明を取り出すブリッジを追加する方式です。Android識別子をハッシュへ対応するなら、認証済みprofileとのサーバー計算照合、購入記録の正規化、Webhookからの所有者解決、復元時の元所有者判定まで一貫して設計・試験する必要があります。単に任意のハッシュを許可したり、CustomerInfoのisActiveで権利を付与しません。
+参照: [固定iOS実装](https://github.com/RevenueCat/purchases-ios/blob/5.95.0/Sources/Purchasing/Purchases/PurchasesOrchestrator.swift)、[固定Android実装](https://github.com/RevenueCat/purchases-android/blob/10.27.0/purchases/src/main/kotlin/com/revenuecat/purchases/google/BillingWrapper.kt)、[SHA-256符号化](https://github.com/RevenueCat/purchases-android/blob/10.27.0/purchases/src/main/kotlin/com/revenuecat/purchases/common/utils.kt)、[依存iOS版](https://github.com/RevenueCat/purchases-hybrid-common/blob/19.11.0/PurchasesHybridCommon.podspec)、[依存Android版](https://github.com/RevenueCat/purchases-hybrid-common/blob/19.11.0/android/gradle/libs.versions.toml)、[SDK型](https://github.com/RevenueCat/purchases-hybrid-common/blob/19.11.0/typescript/src/customerInfo.ts)。ネイティブのロックファイルで実際の解決版を確認し、更新時は再確認してください。
 
-別候補は [RevenueCatと自前IAP処理の併用](https://www.revenuecat.com/docs/migrating-to-revenuecat/sdk-or-not/finishing-transactions) です。StoreKit/Play Billingで現accountTokenを設定し証明を取得した後、RevenueCatへ同期します。購入完了/acknowledgeの担当、両OS実装、復元・移転設定の検証が増えるため、今回本番方式として採用していません。
+### 通常購入
 
-RevenueCatサーバー権利へ移行する方式も未採用です。Webhookの認証、署名/共有秘密の管理、所有者紐付け、再送・順序、直接ストア通知との二重更新防止、失効最大24時間、同一ストア復旧証明を別途設計する必要があります。現APIの購入・復旧制約と権利の更新元は変更していません。
+1. API bootstrap で得た `accountToken`（プロフィールUUID）をそのまま RevenueCat の `appUserID` に設定。事前ハッシュ化しません。
+2. RevenueCat で購入。保留・取消は購入成功として扱いません。
+3. iOS は transaction.transactionIdentifier を `{store:'apple',transactionId}`、Android は実際の transaction.purchaseToken を `{store:'google',purchaseToken}` として `POST /v1/billing/verify` へ本人Bearer付きで送ります。Androidのtokenがnullなら後述のネイティブ照会で取得します。注文番号の代用は禁止です。
+4. API成功後に `GET /v1/me` / `GET /v1/billing/subscriptions` を再取得。verify は通常 entitlement を返しますが、遅延応答が最新検証に追い越された場合は `{received:true}` です。いずれも現状態の再取得が必要です。
 
-実ストアの無料体験・購入・復元・更新・取消・返金・応答喪失、Apple署名JWSの実機取得、RevenueCatのID結合/移転挙動は未検証。商品設定・本番配信・本番デプロイ・認証情報の発行は実施していません。
+Google は本人の profile UUID と、その UTF-8 SHA-256 を標準Base64（paddingあり・改行なし）に符号化した値だけを一致対象とします。APIがストアから得た識別子をサーバー計算で照合し、DBには元のUUIDで正規化します。購入時の照合はacknowledge前にも行います。Webhookは既に登録した現在/linked purchase referenceから所有者を得て同じ照合をします。未知のハッシュからプロフィールを探索せず403にし、最初の本人によるverifyを待ちます。既存の直接UUID形式は互換維持、Appleにはハッシュを許可しません。Webhook単独ではownerVerifiedAtを立てません。
+
+### 同一ストア復旧
+
+新規bootstrapのBearerを保持し、利用者が復旧を選んだときにOSから証明を取得します。復旧対象は元のアカウントなので、その証明の所有者を新bootstrapのaccountTokenと比較して除外しません。
+
+- iOS: 明示的な復旧操作でだけ `AppStore.sync()`、次に `Transaction.currentEntitlements` の verified 結果から対象商品の自動更新購読・本人購入を選び、その **VerificationResult.jwsRepresentation全体** を取得。`POST /v1/auth/restore` に `{store:'apple',signedTransaction}` を送信。transactionIdだけでは復旧不可。
+- Android: BillingClient の `queryPurchasesAsync(SUBS)` で PURCHASED の対象購読を照会し、`Purchase.purchaseToken` を取得。同APIに `{store:'google',purchaseToken}` を送信。現在の権利・商品・地域・所有者はAPIがGoogleへ再照会します。
+- APIは登録済み購入reference/linked reference、過去の本人購入検証、現在のストア検証、所有者の一致を必須とします。ハッシュ形式でも条件は同じです。未登録や複数の別所有者を結合しません。
+- API成功後、返されたtokenをSecureStoreに保存し、返された元のaccountTokenにRevenueCatを合わせ、通知を再登録します。復旧前に新IDでRevenueCat restore/logInを実行して購入移転を起こす経路は避けます。RevenueCatの移転設定は未決定です。
+- 複数アカウントに対応する購入候補がある場合は自動的にマージ・順次復旧しません。候補選択の設計が必要です。復旧は旧端末認証・既存セッション・Expo登録を失効させますが、チェックインや監視再開は行いません。
+
+### アプリ側に必要な小さなネイティブモジュール
+
+APIリポジトリにはネイティブコードを追加しません。アプリ側の候補構成は `modules/store-proof/index.ts`、`ios/StoreProofModule.swift`、`android/.../StoreProofModule.kt`、`expo-module.config.json` です。
+
+```ts
+type AppleProof = { productId: string; transactionId: string; signedTransaction: string };
+type GoogleProof = { productIds: string[]; purchaseToken: string };
+// sync=true は利用者が明示的に復旧を要求した場合だけ
+getAppleProofs(options: { sync: boolean }): Promise<AppleProof[]>;
+getGoogleProofs(): Promise<GoogleProof[]>;
+```
+
+iOSは未検証/家族共有/失効を候補から除外し、JWSをそのまま返します。Androidは接続・結果・終了を管理し、保留購入を候補に含めません。ブリッジは証明読取だけに限定し、独自のpurchase/finish/consume/acknowledgeを加えてSDKと競合させません。証明はログ・SQLite・分析に記録せず、APIへ送信する間だけメモリ保持。Expo Goではなくネイティブビルドが必要です。
+
+OS資料: [Apple currentEntitlements](https://developer.apple.com/documentation/storekit/transaction/currententitlements)、[Apple JWS](https://developer.apple.com/documentation/storekit/verificationresult/jwsrepresentation)、[Apple sync](<https://developer.apple.com/documentation/storekit/appstore/sync()>)、[Play Billing照会](https://developer.android.com/google/play/billing/integrate)、[Purchase token](<https://developer.android.com/reference/com/android/billingclient/api/Purchase#getPurchaseToken()>)。
+
+実機の証明取得・署名・無料体験・購入・復旧・更新・返金・応答喪失、SDKのID移転/alias、置換購入でのaccount識別子は未検証です。本番配信、ストア設定、認証情報発行は未実施です。RevenueCat Webhookの接続案は別文書に残し、公開ルートや権利更新元には採用していません。
+
+## 最新 Page との差分と未確定契約
+
+- **API-021 一部実装**: `GET /v1/devices` は本人Bearer・既存購読条件で `{devices:[{id,createdAt}]}`（登録日時降順）を返します。型は `DevicesResponse`。所有者以外の端末・Expo token・認証tokenは含みません。既存の最大5件、DELETE時の未送信push無効化を維持。name/platform/lastSeenAt/isCurrentは記録・意味が未確定なので返しません。POSTの返却IDをアプリで保存して現端末を表示する案は継続可能ですが、再登録/復旧後は更新が必要です。
+- **API-022 保留**: 検証済み本人メール変更のエンドポイントは追加していません。必要な決定は、直近再認証の基準、旧・新メール両方の確認と有効期限、旧メール利用不可時の本人復旧、変更途中/完了時の監視停止、旧リンク・旧端末・セッションの失効範囲、通知宛先と文面、レート制限です。既存の初回連絡先検証をメール変更として流用しません。
+- **API-019 保留**: 汎用冪等性契約（キー保持期限・範囲・再送応答）は未確定。既存version照合と状態再取得を継続します。
+- API-023 SMS / API-024 異ストア復旧は次期。新しい認証方法や購入権利の緩和は追加しません。
 
 ## 同居する受取Web
 

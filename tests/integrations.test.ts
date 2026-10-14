@@ -17,6 +17,7 @@ import {
   type VerifiedSubscription,
 } from "../src/integrations/stores";
 import { BillingService } from "../src/services/billing";
+import { googleAccountHash, storeAccountMatches } from "../src/integrations/store-account";
 import { DAY } from "../src/services/switch";
 import { entitlements, outbox, storeSubscriptions, devices } from "../src/db/schema";
 import { enqueue, gatewayTransport } from "../src/services/notifications";
@@ -249,6 +250,7 @@ test("Google verifier uses server OAuth/API and acknowledges a bound purchase", 
     STORE_PRODUCTS: JSON.stringify({ google: { "basic:annual": "basic" } }),
   };
   const calls: string[] = [];
+  let account = "bound-user";
   const verifier = createStoreVerifier(
     env,
     fakeHttp(async (url) => {
@@ -257,7 +259,7 @@ test("Google verifier uses server OAuth/API and acknowledges a bound purchase", 
         return Response.json({ access_token: "oauth-token" });
       if (url.endsWith(":acknowledge")) return new Response(null, { status: 204 });
       return Response.json({
-        ...googlePurchase("bound-user"),
+        ...googlePurchase(account),
         acknowledgementState: "ACKNOWLEDGEMENT_STATE_PENDING",
       });
     }),
@@ -270,6 +272,16 @@ test("Google verifier uses server OAuth/API and acknowledges a bound purchase", 
   expect(
     calls.some((url) => url.endsWith("/subscriptions/basic/tokens/purchase-token:acknowledge")),
   ).toBe(true);
+  calls.length = 0;
+  account = await googleAccountHash("bound-user");
+  await expect(verifier.verify("google", "purchase-token", "attacker")).rejects.toThrow(
+    "PURCHASE_ACCOUNT_MISMATCH",
+  );
+  expect(calls.some((url) => url.endsWith(":acknowledge"))).toBe(false);
+  expect((await verifier.verify("google", "purchase-token", "bound-user")).accountToken).toBe(
+    account,
+  );
+  expect(calls.some((url) => url.endsWith(":acknowledge"))).toBe(true);
 });
 function stubVerifier(get: () => VerifiedSubscription): StoreVerifier {
   return {
@@ -279,6 +291,80 @@ function stubVerifier(get: () => VerifiedSubscription): StoreVerifier {
     googlePushAuthorization: async () => {},
   };
 }
+test("hashed Google webhook ownership needs registered references and never grants restoration proof", async () => {
+  expect(await googleAccountHash("abc")).toBe("ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=");
+  const owner = await f.createUser();
+  const other = await f.createUser("other@example.jp");
+  const hashed = await googleAccountHash(owner.profile.id);
+  expect(await storeAccountMatches("apple", hashed, owner.profile.id)).toBe(false);
+  expect(await storeAccountMatches("google", hashed.toUpperCase(), owner.profile.id)).toBe(false);
+  expect(await storeAccountMatches("google", hashed.replace(/=+$/, ""), owner.profile.id)).toBe(
+    false,
+  );
+  let verified: VerifiedSubscription = {
+    store: "google",
+    accountToken: hashed,
+    reference: "rc-current",
+    productId: "basic:annual",
+    plan: "basic",
+    status: "active",
+    validUntil: f.now() + 30 * DAY,
+  };
+  const billing = new BillingService(
+    f.db,
+    f.env,
+    stubVerifier(() => verified),
+    f.now,
+  );
+  await expect(billing.verify("google", verified.reference)).rejects.toThrow(
+    "PURCHASE_NOT_REGISTERED",
+  );
+  expect(await f.db.select().from(storeSubscriptions)).toHaveLength(0);
+  await billing.verifyPurchase("google", verified.reference, owner.profile.id);
+  const registered = (await f.db.select().from(storeSubscriptions))[0]!;
+  expect(registered.profileId).toBe(owner.profile.id);
+  expect(registered.ownerVerifiedAt).toBe(f.now());
+  f.advance(1);
+  verified = { ...verified, reference: "rc-next", linkedReference: "rc-current" };
+  await billing.verify("google", verified.reference, undefined, "google:rc-event");
+  const rows = await f.db.select().from(storeSubscriptions);
+  expect(rows.every((row) => row.profileId === owner.profile.id)).toBe(true);
+  expect(rows.filter((row) => row.ownerVerifiedAt !== null)).toHaveLength(1);
+  verified = { ...verified, accountToken: await googleAccountHash(other.profile.id) };
+  await expect(billing.verify("google", verified.reference)).rejects.toThrow(
+    "PURCHASE_ACCOUNT_MISMATCH",
+  );
+  await expect(
+    billing.verifyRestoration({ store: "google", purchaseToken: verified.reference }),
+  ).rejects.toThrow("PURCHASE_NOT_REGISTERED");
+  expect(
+    (await f.db.select().from(entitlements)).every((row) => row.profileId === owner.profile.id),
+  ).toBe(true);
+});
+
+test("legacy Google direct-ID notifications remain readable but cannot alone establish recovery", async () => {
+  const owner = await f.createUser();
+  const verified: VerifiedSubscription = {
+    store: "google",
+    accountToken: owner.profile.id,
+    reference: "legacy",
+    productId: "basic:annual",
+    plan: "basic",
+    status: "active",
+    validUntil: f.now() + 30 * DAY,
+  };
+  const billing = new BillingService(
+    f.db,
+    f.env,
+    stubVerifier(() => verified),
+    f.now,
+  );
+  await billing.verify("google", "legacy");
+  expect((await f.db.select().from(storeSubscriptions))[0]!.ownerVerifiedAt).toBeNull();
+  await expect(
+    billing.verifyRestoration({ store: "google", purchaseToken: "legacy" }),
+  ).rejects.toThrow("PURCHASE_NOT_REGISTERED");
+});
 test("store entitlement is account-bound, encrypted, and expires if refresh stops", async () => {
   const owner = await f.createUser();
   const verified: VerifiedSubscription = {

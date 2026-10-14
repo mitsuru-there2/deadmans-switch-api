@@ -234,11 +234,18 @@ export function createApp(deps: AppDependencies = {}) {
       return c.get("auth").handler(c.req.raw);
     })
     .use("/v1/*", async (c, next) => {
+      const authHeaders = new Headers(c.req.raw.headers);
+      if (c.req.path === "/v1/devices" && c.req.method === "GET") {
+        if (!authHeaders.get("Authorization")?.startsWith("Bearer "))
+          throw new AppError(401, "AUTHENTICATION_REQUIRED");
+        // This native endpoint must not fall back to a browser cookie for a malformed bearer.
+        authHeaders.delete("Cookie");
+      }
       const token = c.req.header("Authorization")?.replace(/^Bearer /, "") ?? "";
       const isDevice = token.startsWith("dms_");
       const u = isDevice
         ? await new DeviceAuthService(c.get("db"), c.get("config"), now).authenticate(token)
-        : (await c.get("auth").api.getSession({ headers: c.req.raw.headers }))?.user;
+        : (await c.get("auth").api.getSession({ headers: authHeaders }))?.user;
       if (!u || (!isDevice && !u.emailVerified)) throw new AppError(401, "AUTHENTICATION_REQUIRED");
       c.set("user", u);
       c.set("deviceToken", isDevice ? token : undefined);
@@ -530,6 +537,17 @@ export function createApp(deps: AppDependencies = {}) {
         );
       },
     )
+    .get("/v1/devices", async (c) => {
+      const p = await c.get("service").profile(c.get("user").id);
+      return c.json({
+        devices: await c
+          .get("db")
+          .select({ id: devices.id, createdAt: devices.createdAt })
+          .from(devices)
+          .where(eq(devices.profileId, p.id))
+          .orderBy(desc(devices.createdAt)),
+      });
+    })
     .post(
       "/v1/devices",
       validator("json", (value: z.input<typeof deviceSchema>) => deviceSchema.parse(value)),

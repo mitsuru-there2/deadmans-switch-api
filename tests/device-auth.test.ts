@@ -12,6 +12,7 @@ import {
 import { DeviceAuthService } from "../src/services/device-auth";
 import type { Notice } from "../src/services/notifications";
 import { DAY } from "../src/services/switch";
+import { googleAccountHash } from "../src/integrations/store-account";
 let f: Fixture;
 let purchase: VerifiedSubscription;
 beforeEach(async () => {
@@ -402,4 +403,86 @@ test("restore does not merge an existing different account", async () => {
   ).toBe(409);
   expect((await f.request("/v1/me", "GET", undefined, old.token)).status).toBe(200);
   expect((await f.request("/v1/me", "GET", undefined, other.token)).status).toBe(200);
+});
+
+test("Google hashed ownership verifies only its owner and restores a registered linked purchase", async () => {
+  const old = await bootstrap();
+  const fresh = await bootstrap();
+  purchase = {
+    store: "google",
+    reference: "rc-google-token",
+    accountToken: await googleAccountHash(old.accountToken),
+    productId: "basic:annual",
+    plan: "basic",
+    status: "active",
+    validUntil: f.now() + 30 * DAY,
+  };
+  const proof = { store: "google", purchaseToken: purchase.reference };
+  expect((await f.request("/v1/auth/restore", "POST", proof, fresh.token)).status).toBe(403);
+  expect((await f.request("/v1/billing/verify", "POST", proof, fresh.token)).status).toBe(403);
+  expect((await f.request("/v1/billing/verify", "POST", proof, old.token)).status).toBe(200);
+  purchase = { ...purchase, reference: "rc-replacement", linkedReference: purchase.reference };
+  const response = await f.request(
+    "/v1/auth/restore",
+    "POST",
+    { store: "google", purchaseToken: purchase.reference },
+    fresh.token,
+  );
+  expect(response.status).toBe(200);
+  const restored = (await response.json()) as {
+    userId: string;
+    accountToken: string;
+    token: string;
+  };
+  expect(restored.userId).toBe(old.userId);
+  expect(restored.accountToken).toBe(old.accountToken);
+  expect((await f.request("/v1/me", "GET", undefined, old.token)).status).toBe(401);
+  expect((await f.request("/v1/me", "GET", undefined, restored.token)).status).toBe(200);
+});
+
+test("device list contains only owned registration IDs and timestamps, with the existing five device cap", async () => {
+  const owner = await bootstrap();
+  const other = await bootstrap();
+  await subscribe(owner);
+  await f.service.addDevice(other.userId, "ExpoPushToken[other-device]");
+  const expected = [];
+  for (let i = 0; i < 5; i++) {
+    f.advance(1);
+    const device = await f.service.addDevice(owner.userId, `ExpoPushToken[owner-${i}]`);
+    expected.unshift({ id: device.id, createdAt: f.now() });
+  }
+  await expect(f.service.addDevice(owner.userId, "ExpoPushToken[sixth]")).rejects.toThrow(
+    "DEVICE_LIMIT",
+  );
+  expect((await f.request("/v1/devices")).status).toBe(401);
+  const response = await f.request("/v1/devices", "GET", undefined, owner.token);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ devices: expected });
+  expect(
+    (await f.request(`/v1/devices/${expected[0]!.id}`, "DELETE", undefined, owner.token)).status,
+  ).toBe(204);
+  const after = await f.request("/v1/devices", "GET", undefined, owner.token);
+  expect(await after.json()).toEqual({ devices: expected.slice(1) });
+});
+
+test("native device list rejects cookie-only and malformed bearer fallback", async () => {
+  const owner = await f.createUser();
+  await f.grant(owner.profile.id);
+  await f.request("/api/auth/sign-in/magic-link", "POST", {
+    email: owner.email,
+    callbackURL: "/recipient-auth",
+  });
+  const job = (await f.db.select().from(outbox).where(eq(outbox.kind, "auth")))[0]!;
+  const notice = await f.service.vault.open<Notice>(job.payload, `outbox:${job.id}`);
+  const verified = await f.app.request(notice.url!, {}, f.env);
+  const cookie = verified.headers.get("set-cookie")!.match(/better-auth\.session_token=[^;]+/)![0];
+  expect((await f.request("/v1/me", "GET", undefined, undefined, { Cookie: cookie })).status).toBe(
+    200,
+  );
+  for (const token of [undefined, "bad.signature", " "]) {
+    expect(
+      (await f.request("/v1/devices", "GET", undefined, token, { Cookie: cookie })).status,
+    ).toBe(401);
+  }
+  expect((await f.request("/v1/devices", "GET", undefined, owner.token)).status).toBe(200);
 });
