@@ -69,7 +69,7 @@ ExpoのUniversal Links / App Linksを`TRUSTED_ORIGINS`へ設定します。任�
 有効化例:
 
 ```json
-{ "version": 5, "confirmed": true, "consentVersion": "2026-10-13-v1" }
+{ "version": 5, "confirmed": true, "consentVersion": "2026-10-14-v2" }
 ```
 
 状態応答の主なフィールド:
@@ -84,7 +84,7 @@ ExpoのUniversal Links / App Linksを`TRUSTED_ORIGINS`へ設定します。任�
   "confirmationDueAt": 1794438000000,
   "earliestReleaseAt": null,
   "holdReason": null,
-  "consentVersion": "2026-10-13-v1"
+  "consentVersion": "2026-10-14-v2"
 }
 ```
 
@@ -131,3 +131,11 @@ ExpoのUniversal Links / App Linksを`TRUSTED_ORIGINS`へ設定します。任�
 `/internal/*`は`Authorization: Bearer OPERATIONS_SECRET`です。利用者のセッションでは呼べません。`/webhooks/events`の署名と契約は[接続仕様](integrations.md)を参照してください。
 
 `POST /webhooks/resend`はSvix署名、`POST /webhooks/apple`はApple署名JWS、`POST /webhooks/google`はGoogle OIDCを検証します。詳細な商品・鍵・通知設定は[配信・ストア連携](integrations.md)にあります。
+
+## アプリ向けの共有応答と同意本文
+
+全 `/v1` JSON成功応答のschemaはOpenAPIと`src/responses.ts`で共有し、Hono Clientは`deadmans-switch-api/client`から利用できます。接続例・互換追加・購入接続の未解決点は[アプリ契約](app-contract.md)を参照してください。
+
+`GET /v1/consents/current`は認証必須、購入前でも利用可能で`{version,language,effectiveAt,title,body}`を返します。取得した所有者説明文を表示し、明示同意の際にversionをactivateのconsentVersionとして送ってください。受取開封のnoticeVersionとは別です。
+
+監視のGET応答にはserverTimeとactivationBlockersを追加しました。blockersは表示補助であり、有効化時には最新状態を再検査します。宛先のGETにはinvitationExpiresAt/nextInvitationAt、自分宛テストの202にはdeliveryIdを含めます。テストのdeliveryIdを配信台帳で追跡し、accepted/deliveredまで合格にしません。

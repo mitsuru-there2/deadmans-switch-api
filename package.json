@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": {
+    "./client": "./src/client.ts",
+    "./contracts": "./src/contracts.ts",
+    "./responses": "./src/responses.ts"
+  },
   "scripts": {
     "dev": "WRANGLER_LOG_PATH=.local/wrangler.log wrangler dev --test-scheduled --ip 127.0.0.1",
     "build": "WRANGLER_LOG_PATH=.local/wrangler.log wrangler deploy --env=\"\" --dry-run --outdir dist",

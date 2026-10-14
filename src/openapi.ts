@@ -1,5 +1,6 @@
 import { z } from "zod";
 import * as c from "./contracts";
+import { successResponses } from "./responses";
 
 type Method = "get" | "post" | "put" | "patch" | "delete";
 const paths: Record<string, Partial<Record<Method, unknown>>> = {};
@@ -12,6 +13,7 @@ function route(
   security: unknown[] = [{ bearerAuth: [] }, { cookieAuth: [] }],
   response?: z.ZodType,
 ) {
+  response ??= successResponses[`${method} ${path}`];
   const parameters = [...path.matchAll(/\{(\w+)\}/g)].map((match) => ({
     name: match[1],
     in: "path",
@@ -119,6 +121,11 @@ route(
   undefined,
   200,
   [{ svixId: [], svixTimestamp: [], svixSignature: [] }],
+);
+route(
+  "get",
+  "/v1/consents/current",
+  "Current owner activation consent text and version; available before purchase",
 );
 route("get", "/v1/me", "Current identity, contact verification and subscription status");
 route("delete", "/v1/me", "Delete account and private data", c.deleteAccountSchema, 204);

@@ -15,6 +15,7 @@ import {
   user,
   type Profile,
 } from "../db/schema";
+import type { ActivationBlocker } from "../responses";
 import type { Env } from "../env";
 import { hash, randomToken, Vault } from "../lib/crypto";
 import { AppError, requireValue } from "../lib/errors";
@@ -24,7 +25,8 @@ export const DAY = 86_400_000;
 export const OPENING_NOTICE_VERSION = "2026-10-14-v1";
 export const OPENING_NOTICE =
   "この通知は、送信者の死亡を確認したものではありません。送信者が亡くなったことを別の手段で確認してから、伝言を開いてください。この同意は受取人の自己申告であり、公的な死亡確認や受取人認証を代替しません。";
-export const CONSENT_VERSION = "2026-10-13-v1";
+import { CONSENT_VERSION } from "../consents";
+export { CONSENT_VERSION } from "../consents";
 export interface Contact {
   name: string;
   email: string;
@@ -120,6 +122,10 @@ export class SwitchService {
     const deadline = p.lastCheckInAt === null ? null : p.lastCheckInAt + p.inactivityDays * DAY;
     return {
       ...p,
+      serverTime: this.now(),
+      activationBlockers: (await this.activationRequirements(this.db, p, this.now())).map(
+        (item) => item.code,
+      ),
       entitlement,
       confirmationDueAt: deadline,
       earliestReleaseAt:
@@ -202,6 +208,13 @@ export class SwitchService {
         channel: r.channel,
         status: r.status,
         acceptedAt: r.acceptedAt,
+        invitationExpiresAt: r.invitationExpiresAt,
+        nextInvitationAt:
+          r.status === "pending"
+            ? r.lastInvitedAt === null
+              ? this.now()
+              : r.lastInvitedAt + DAY
+            : null,
         ...(await this.vault.open<Contact>(r.contact, `recipient:${r.id}`)),
       })),
     );
@@ -463,6 +476,53 @@ export class SwitchService {
       { behavior: "immediate" },
     );
   }
+  private async activationRequirements(tx: DbOrTx, p: Profile, now: number) {
+    const blockers: Array<{ status: 422 | 503 | 409; code: ActivationBlocker }> = [];
+    if (!["draft", "paused", "held"].includes(p.state))
+      blockers.push({ status: 409, code: "PAUSE_BEFORE_EDITING" });
+    const u = requireValue((await tx.select().from(user).where(eq(user.id, p.userId)))[0]);
+    if (!u.emailVerified) blockers.push({ status: 422, code: "VERIFIED_EMAIL_REQUIRED" });
+    const e = (await tx.select().from(entitlements).where(eq(entitlements.profileId, p.id)))[0];
+    if (!isEntitled(e, now)) blockers.push({ status: 422, code: "ACTIVE_ENTITLEMENT_REQUIRED" });
+    const health = (
+      await tx.select().from(systemHealth).where(eq(systemHealth.id, "scheduler"))
+    )[0];
+    if (
+      !health?.lastTickAt ||
+      !health.lastProbeAt ||
+      now - health.lastTickAt > 300_000 ||
+      now - health.lastProbeAt > 300_000 ||
+      health.incidentAt
+    )
+      blockers.push({ status: 503, code: "MONITORING_UNHEALTHY" });
+    if (this.env.DELIVERY_ENABLED !== "true")
+      blockers.push({ status: 503, code: "DELIVERY_DISABLED" });
+    const selfTest =
+      (
+        await tx
+          .select({ id: outbox.id })
+          .from(outbox)
+          .where(
+            and(
+              eq(outbox.profileId, p.id),
+              eq(outbox.kind, "self_test"),
+              inArray(outbox.state, ["accepted", "delivered"]),
+            ),
+          )
+      ).length > 0;
+    if (!selfTest) blockers.push({ status: 422, code: "SELF_TEST_REQUIRED" });
+    const rs = await tx.select().from(recipients).where(eq(recipients.profileId, p.id));
+    const ms = await tx.select().from(messages).where(eq(messages.profileId, p.id));
+    if (rs.some((r) => r.channel !== "email"))
+      blockers.push({ status: 422, code: "SMS_NOT_SUPPORTED" });
+    if (
+      !rs.length ||
+      rs.length > recipientLimit(e?.plan) ||
+      rs.some((r) => r.status !== "accepted" || !ms.some((m) => m.recipientId === r.id))
+    )
+      blockers.push({ status: 422, code: "RECIPIENTS_NOT_READY" });
+    return blockers;
+  }
   async activate(userId: string, version: number, consentVersion: string) {
     if (consentVersion !== CONSENT_VERSION) throw new AppError(422, "CONSENT_VERSION_REQUIRED");
     return this.db.transaction(
@@ -470,45 +530,8 @@ export class SwitchService {
         const now = this.now(),
           p = await this.owned(tx, userId, version);
         this.editable(p);
-        const u = requireValue((await tx.select().from(user).where(eq(user.id, userId)))[0]);
-        if (!u.emailVerified) throw new AppError(422, "VERIFIED_EMAIL_REQUIRED");
-        const e = (await tx.select().from(entitlements).where(eq(entitlements.profileId, p.id)))[0];
-        if (!isEntitled(e, now)) throw new AppError(422, "ACTIVE_ENTITLEMENT_REQUIRED");
-        const health = (
-          await tx.select().from(systemHealth).where(eq(systemHealth.id, "scheduler"))
-        )[0];
-        if (
-          !health?.lastTickAt ||
-          !health.lastProbeAt ||
-          now - health.lastTickAt > 300_000 ||
-          now - health.lastProbeAt > 300_000 ||
-          health.incidentAt
-        )
-          throw new AppError(503, "MONITORING_UNHEALTHY");
-        if (this.env.DELIVERY_ENABLED !== "true") throw new AppError(503, "DELIVERY_DISABLED");
-        const selfTest =
-          (
-            await tx
-              .select({ id: outbox.id })
-              .from(outbox)
-              .where(
-                and(
-                  eq(outbox.profileId, p.id),
-                  eq(outbox.kind, "self_test"),
-                  inArray(outbox.state, ["accepted", "delivered"]),
-                ),
-              )
-          ).length > 0;
-        if (!selfTest) throw new AppError(422, "SELF_TEST_REQUIRED");
-        const rs = await tx.select().from(recipients).where(eq(recipients.profileId, p.id));
-        const ms = await tx.select().from(messages).where(eq(messages.profileId, p.id));
-        if (rs.some((r) => r.channel !== "email")) throw new AppError(422, "SMS_NOT_SUPPORTED");
-        if (
-          !rs.length ||
-          rs.length > recipientLimit(e?.plan) ||
-          rs.some((r) => r.status !== "accepted" || !ms.some((m) => m.recipientId === r.id))
-        )
-          throw new AppError(422, "RECIPIENTS_NOT_READY");
+        const blockers = await this.activationRequirements(tx, p, now);
+        if (blockers[0]) throw new AppError(blockers[0].status, blockers[0].code);
         const next = await invalidate(tx, p, "active", now);
         await tx
           .update(profiles)
@@ -665,6 +688,7 @@ export class SwitchService {
           .update(deliveries)
           .set({ viewedAt: d.viewedAt ?? confirmedAt })
           .where(eq(deliveries.id, d.id));
+        if (d.expiresAt <= this.now()) throw new AppError(404, "NOT_FOUND");
         return { message, expiresAt: d.expiresAt };
       },
       { behavior: "immediate" },
