@@ -293,6 +293,8 @@ export const storeSubscriptions = sqliteTable(
       .references(() => profiles.id, { onDelete: "cascade" }),
     store: text({ enum: ["apple", "google"] }).notNull(),
     referenceHash: text("reference_hash").notNull().unique(),
+    // Only persisted from a successful server-side store verification; never client input.
+    linkedReferenceHash: text("linked_reference_hash"),
     reference: text().notNull(),
     productId: text("product_id").notNull(),
     plan: text({ enum: ["basic", "plus"] }).notNull(),

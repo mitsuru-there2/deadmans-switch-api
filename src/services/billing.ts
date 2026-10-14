@@ -102,13 +102,13 @@ export class BillingService {
     const profileId = known[0]?.profileId;
     if (
       !profileId ||
-      !known.some((s) => s.ownerVerifiedAt !== null) ||
       known.some((s) => s.profileId !== profileId) ||
       !(await storeAccountMatches(verified.store, verified.accountToken, profileId))
     )
       throw new AppError(403, "PURCHASE_NOT_REGISTERED");
     const normalized = { ...verified, accountToken: profileId };
-    await this.apply(normalized, startedAt, undefined, true);
+    // Check the persisted replacement lineage in the write transaction before accepting recovery.
+    await this.apply(normalized, startedAt, undefined, true, true);
     if (!["active", "grace"].includes(verified.status) || verified.validUntil <= this.now())
       throw new AppError(403, "SUBSCRIPTION_REQUIRED");
     return normalized;
@@ -159,6 +159,7 @@ export class BillingService {
     startedAt: number,
     eventId?: string,
     ownerVerified = false,
+    requireRegisteredLineage = false,
   ) {
     const referenceHash = await hash(`${verified.store}:${verified.reference}`);
     const linkedHash = verified.linkedReference
@@ -184,8 +185,26 @@ export class BillingService {
             .from(storeSubscriptions)
             .where(eq(storeSubscriptions.referenceHash, referenceHash))
         )[0];
-        if (current && current.profileId !== p.id)
+        if (current && (current.profileId !== p.id || current.store !== verified.store))
           throw new AppError(403, "PURCHASE_ALREADY_LINKED");
+        // Store-issued replacement edges are immutable once observed. Missing edges in a
+        // later response must not erase the evidence needed to recover through older purchases.
+        if (
+          linkedHash &&
+          current?.linkedReferenceHash &&
+          linkedHash !== current.linkedReferenceHash
+        )
+          throw new AppError(403, "PURCHASE_CHAIN_INVALID");
+        const predecessor = linkedHash ?? current?.linkedReferenceHash ?? null;
+        await this.checkLineage(
+          tx,
+          verified.store,
+          p.id,
+          referenceHash,
+          predecessor,
+          current?.ownerVerifiedAt !== null && current?.ownerVerifiedAt !== undefined,
+          requireRegisteredLineage,
+        );
         // Out-of-order network responses cannot overwrite a newer verification.
         if (current && current.verifiedAt > startedAt) {
           // Keep newer store state, but retain proof of the authenticated owner's original binding.
@@ -202,6 +221,7 @@ export class BillingService {
           profileId: p.id,
           store: verified.store,
           referenceHash,
+          linkedReferenceHash: predecessor,
           reference: await this.vault.seal(verified.reference, `subscription:${id}`),
           productId: verified.productId,
           plan: verified.plan,
@@ -233,6 +253,35 @@ export class BillingService {
       },
       { behavior: "immediate" },
     );
+  }
+  private async checkLineage(
+    tx: Tx,
+    store: Store,
+    profileId: string,
+    referenceHash: string,
+    predecessor: string | null,
+    hasOwnerProof: boolean,
+    requireRegistered: boolean,
+  ) {
+    const seen = new Set([referenceHash]);
+    let next = predecessor;
+    while (next) {
+      if (seen.has(next) || seen.size >= 256) throw new AppError(403, "PURCHASE_CHAIN_INVALID");
+      seen.add(next);
+      const prior = (
+        await tx.select().from(storeSubscriptions).where(eq(storeSubscriptions.referenceHash, next))
+      )[0];
+      if (!prior) {
+        // Preserve an unresolved store-issued edge, but it cannot authorize recovery.
+        if (requireRegistered) throw new AppError(403, "PURCHASE_NOT_REGISTERED");
+        return;
+      }
+      if (prior.profileId !== profileId || prior.store !== store)
+        throw new AppError(403, "PURCHASE_ALREADY_LINKED");
+      hasOwnerProof ||= prior.ownerVerifiedAt !== null;
+      next = prior.linkedReferenceHash;
+    }
+    if (requireRegistered && !hasOwnerProof) throw new AppError(403, "PURCHASE_NOT_REGISTERED");
   }
   async appleWebhook(signedPayload: string) {
     const notice = await this.verifier.appleNotification(signedPayload);
