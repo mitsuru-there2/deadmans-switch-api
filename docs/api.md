@@ -92,7 +92,7 @@ ExpoのUniversal Links / App Linksを`TRUSTED_ORIGINS`へ設定します。任�
 
 ## 受信者用
 
-招待URLは`RECIPIENT_WEB_URL/invitations#TOKEN`、最終通知URLは`RECIPIENT_WEB_URL/receive#TOKEN`です。フラグメントをWebクライアントで読み、APIのJSON本文へ渡します。フロントエンドはログインを挟んでフラグメントを安全に保持し、解析・Referer・サーバーログへ流さないでください。このリポジトリはAPIのみなので、これらのWeb画面は別途必要です。
+招待URLは`RECIPIENT_WEB_URL/invitations#TOKEN`、最終通知URLは`RECIPIENT_WEB_URL/receive#TOKEN`です。フラグメントをWebクライアントで読み、APIのJSON本文へ渡します。フロントエンドはログインを挟んでフラグメントを安全に保持し、解析・Referer・サーバーログへ流さないでください。同じHonoで`/invitations`・`/receive`・`/recipient-auth`を配信します。同居構成ではRECIPIENT_WEB_URLをAPIと同じオリジンに設定してください。トークンはメモリだけに保持し、再読込時は最初の通知リンクからやり直します。
 
 | Method / Path                              | JSON入力                                                                                              |
 | ------------------------------------------ | ----------------------------------------------------------------------------------------------------- |

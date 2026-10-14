@@ -76,7 +76,7 @@ bun run local tick
 - 本番の日本国外アクセス拒否
 - `/openapi.json`、マイグレーション、CI、単体・APIテスト、ローカル実環境スモークテスト
 
-Resend・Expo・Apple/GoogleのAPI接続と検証コードを実装しています。実際の送信・購入試験には各サービスの資格情報、ストアの商品設定、通知先URLが必要です。SMSは次期フェーズ対応です。初期フェーズの受信者への最終通知はメールのみで、SMS宛先の登録・送信はできません。受信者Web画面とExpoアプリはこのAPIリポジトリには含みません。Cloudflare/Tursoへのリソース作成・本番デプロイは行っていません。
+Resend・Expo・Apple/GoogleのAPI接続と検証コードを実装しています。実際の送信・購入試験には各サービスの資格情報、ストアの商品設定、通知先URLが必要です。SMSは次期フェーズ対応です。初期フェーズの受信者への最終通知はメールのみで、SMS宛先の登録・送信はできません。受信者Web画面（招待・メール認証・開封前確認・本文表示）は同じHonoに含みます。Expoアプリは別リポジトリです。Cloudflare/Tursoへのリソース作成・本番デプロイは行っていません。
 
 ## 初期仕様
 
@@ -133,3 +133,9 @@ Tursoの**東京（`nrt`）プライマリと日本国内だけの配置**を管
 - `src/emails/notice.ts`: React Emailの日本語テンプレート
 
 要件の参照元は[企画](https://chatgpt.com/space/page_7015eddc4d3c81919a5746fe47c291d0)と[システム構成案](https://chatgpt.com/space/page_f1c38b2175b88191a1061ead9ba6e9ee)（2026-10-12版）です。構成案のPostgreSQLは今回の指定でTurso/SQLiteへ、本人の認証案はストア検証＋端末用認証情報へ変更し、メールリンクは連絡先確認・復旧・受信者認証に使います。
+
+## 受取Webのローカル確認
+
+`bun scripts/recipient-web-local.ts`で専用のインメモリDBと外部送信しない認証メールを使い、`http://localhost:8890/__local`から操作できます。別ターミナルで`bun scripts/recipient-web-smoke.ts`を実行すると、実HTTPで認証・preview・開封・停止後失効を確認します。smokeは停止まで進めるため再実行時には専用サーバーを再起動してください。`/__local`経路は検証スクリプトだけに存在し、本番Workerには含みません。
+
+通常の同居構成では`RECIPIENT_WEB_URL`をAPIと同じオリジンに設定します。既存の外部Web用設定は自動変更していません。検証範囲と制約は[受取Web](docs/recipient-web.md)、課金接続案は[RevenueCat](docs/revenuecat-bridge.md)を参照してください。

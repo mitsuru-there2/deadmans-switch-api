@@ -6,6 +6,13 @@ import { z } from "zod";
 import { validator } from "hono/validator";
 import { HTTPException } from "hono/http-exception";
 import { CURRENT_CONSENT } from "./consents";
+import {
+  recipientHtml,
+  recipientCss,
+  recipientScript,
+  authCompleteHtml,
+  authCompleteScript,
+} from "./web/recipient";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { createAuth, type Auth } from "./auth";
 import { connectDb, type Database } from "./db/client";
@@ -134,7 +141,44 @@ export function createApp(deps: AppDependencies = {}) {
   });
   const billing = (db: Database, env: Env) =>
     new BillingService(db, env, deps.storeVerifier ?? createStoreVerifier(env), now);
+  // Static recipient shells contain no per-user data; all disclosure stays in POST APIs.
+  app.use("/receive", async (c, next) => {
+    c.header(
+      "Content-Security-Policy",
+      "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    );
+    await next();
+  });
+  app.use("/invitations", async (c, next) => {
+    c.header(
+      "Content-Security-Policy",
+      "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    );
+    await next();
+  });
+  app.use("/recipient-auth", async (c, next) => {
+    c.header(
+      "Content-Security-Policy",
+      "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    );
+    await next();
+  });
   const routes = app
+    .get("/receive", (c) => c.html(recipientHtml))
+    .get("/invitations", (c) => c.html(recipientHtml))
+    .get("/recipient-auth", (c) => c.html(authCompleteHtml))
+    .get("/recipient-assets/style.css", (c) => {
+      c.header("Content-Type", "text/css; charset=utf-8");
+      return c.body(recipientCss);
+    })
+    .get("/recipient-assets/app.js", (c) => {
+      c.header("Content-Type", "text/javascript; charset=utf-8");
+      return c.body(recipientScript);
+    })
+    .get("/recipient-assets/auth.js", (c) => {
+      c.header("Content-Type", "text/javascript; charset=utf-8");
+      return c.body(authCompleteScript);
+    })
     .get("/openapi.json", (c) => c.json(openApiDocument))
     .get("/health/live", (c) => c.json({ status: "ok" }))
     .get("/health/ready", async (c) => {

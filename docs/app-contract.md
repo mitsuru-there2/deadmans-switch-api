@@ -50,12 +50,10 @@ RevenueCatサーバー権利へ移行する方式も未採用です。Webhookの
 
 実ストアの無料体験・購入・復元・更新・取消・返金・応答喪失、Apple署名JWSの実機取得、RevenueCatのID結合/移転挙動は未検証。商品設定・本番配信・本番デプロイ・認証情報の発行は実施していません。
 
-## 受取Webを同居させる最小構成案
+## 同居する受取Web
 
-現状はAPIのみで、静的HTML配信・受取画面・独自callback画面はありません。Better Authのmagic-link検証と許可済みcallbackへの302は実装済みです。同じHono Workerに `/receive` と `/invitations` のHTML、および同一オリジンの外部JS/CSSを追加すれば同居できます。`RECIPIENT_WEB_URL` をこのオリジンへ合わせる運用変更が必要です。既存の別オリジンWeb構成は自動で変更しません。
+`/receive`・`/invitations`・`/recipient-auth`を同じHonoに実装しました。メール認証後に本文なしpreviewを取得し、受取人のチェックと開封操作でだけreadします。フラグメントは直ちに消し、トークンはメモリのみ。再読込・ページを戻る場合は元リンクからやり直します。タブを隠すと本文とチェックを消去し、遅延応答も破棄します。
 
-推奨フローは、fragmentをメモリへ取り込みhistory.replaceStateでURLから消す→宛先メールのmagic linkを要求→同じタブで認証状態を再確認する明示ボタン→preview→未選択の死亡確認チェックと開封ボタン→readです。callback URLへ伝言トークンを埋め込まず、別タブでメール認証した場合は元タブへ戻す案が最小です。フルページ再読込時は元の通知リンクからやり直せるよう案内します。
+配信するJavaScriptのイベントをDOMモックで実行し、実際のBetter Authメール認証・APIと組み合わせた試験、および専用ローカルサーバーへの実HTTP試験を実施しました。この環境には操作可能なブラウザーがなく、スクリーンショット・実ブラウザー描画・実端末アクセシビリティ確認は未実施です。手順は[受取Web](recipient-web.md)。
 
-HTML/JSには本文・件名・宛先・秘密URLを埋め込まず、本文はread成功後textContentで描画します。CSPはselfのスクリプトのみ、frame-ancestors none、no-store/no-referrer、外部解析なし。招待承諾と開封同意は別画面/別操作。未確認で終了、辞退、通報を提供し、初期表示・認証callback・GETでreadを呼びません。
-
-この段階では提案のみです。API-014のサーバー試験は済みですが、受取Web画面の操作試験は未実施のため、Pagesで受取Web込みの完了とは扱わないでください。
+RevenueCatのサーバー橋渡しについて追加調査とモック実装を[接続案](revenuecat-bridge.md)に記載しました。公開ルート・購入権利・復旧経路は変更していません。
