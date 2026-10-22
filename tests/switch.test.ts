@@ -1,3 +1,4 @@
+import { atomic } from "../src/db/client";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { eq } from "drizzle-orm";
 import {
@@ -262,7 +263,7 @@ test("worker crash after claiming never causes an automatic duplicate", async ()
 test("late warning bounce cancels a prepared release", async () => {
   const { owner } = await release();
   const warning = (await f.db.select().from(outbox).where(eq(outbox.kind, "warning")))[0]!;
-  await f.db.transaction((tx) => recordResult(tx, warning.id, { state: "failed" }, f.now()));
+  await atomic(f.db, (tx) => recordResult(tx, warning.id, { state: "failed" }, f.now()));
   await f.flush();
   expect((await f.service.status(owner.id)).state).toBe("held");
   expect(f.captured.some((v) => v.notice.template === "final")).toBe(false);

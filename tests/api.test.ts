@@ -159,9 +159,8 @@ test("production geo restriction trusts Worker metadata, not request headers", a
   const production = {
     ...f.env,
     APP_ENV: "production" as const,
-    TURSO_DATABASE_URL: "libsql://test.turso.io",
-    TURSO_LOCATION: "nrt" as const,
-    TURSO_AUTH_TOKEN: "test",
+    NOTIFICATION_DRIVER: "native" as const,
+    EMAIL_FROM: "App <notice@example.jp>",
     BETTER_AUTH_URL: "https://api.example.jp",
     TRUSTED_ORIGINS: "https://example.jp",
     RECIPIENT_WEB_URL: "https://example.jp",

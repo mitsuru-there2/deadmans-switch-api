@@ -3,7 +3,7 @@ import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { bearer, magicLink } from "better-auth/plugins";
 import type { Database } from "./db/client";
 import * as schema from "./db/schema";
-import type { Env } from "./env";
+import type { Env } from "./config";
 import { Vault } from "./lib/crypto";
 import { enqueue } from "./services/notifications";
 
@@ -12,7 +12,7 @@ export function createAuth(db: Database, env: Env) {
     appName: "私に何かあったら",
     baseURL: env.BETTER_AUTH_URL,
     secret: env.BETTER_AUTH_SECRET,
-    database: drizzleAdapter(db, { provider: "sqlite", schema, transaction: true }),
+    database: drizzleAdapter(db, { provider: "sqlite", schema, transaction: false }),
     trustedOrigins: env.TRUSTED_ORIGINS.split(",").map((v) => v.trim()),
     emailAndPassword: { enabled: false },
     session: {

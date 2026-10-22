@@ -1,6 +1,8 @@
+import { sendEmail, type SendEmailOptions, type SendEmailResult } from "void/email";
+import { atomic } from "../db/client";
 import { and, eq, gt, like, lt } from "drizzle-orm";
 import { z } from "zod";
-import type { Env } from "../env";
+import type { Env } from "../config";
 import type { Database } from "../db/client";
 import { outbox, webhookEvents } from "../db/schema";
 import { renderNotice } from "../emails/notice";
@@ -8,33 +10,38 @@ import { AppError } from "../lib/errors";
 import { gatewayTransport, recordResult, type Transport } from "../services/notifications";
 
 export type HttpClient = typeof fetch;
-export function notificationTransport(env: Env, http: HttpClient = fetch): Transport {
+export function notificationTransport(
+  env: Env,
+  http: HttpClient = fetch,
+  mail: (options: SendEmailOptions) => Promise<SendEmailResult> = sendEmail,
+): Transport {
   if (env.NOTIFICATION_DRIVER !== "native") return gatewayTransport(env);
   return async (id, notice) => {
     if (notice.channel === "sms") return { state: "failed" };
     try {
       if (notice.channel === "email") {
-        if (!env.RESEND_API_KEY || !env.EMAIL_FROM) return { state: "failed" };
+        if (!env.EMAIL_FROM) return { state: "failed" };
         const content = await renderNotice(notice);
-        const response = await http("https://api.resend.com/emails", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${env.RESEND_API_KEY}`,
-            "Content-Type": "application/json",
-            "Idempotency-Key": id,
-          },
-          body: JSON.stringify({
-            from: env.EMAIL_FROM,
-            to: [notice.to],
-            ...content,
-            tags: [{ name: "outbox_id", value: id }],
-          }),
-          signal: AbortSignal.timeout(10_000),
-          redirect: "manual",
+        const result = await mail({
+          from: env.EMAIL_FROM,
+          to: notice.to,
+          ...content,
+          idempotencyKey: id,
+          headers: { "X-Outbox-ID": id },
         });
-        if (!response.ok) return { state: "uncertain" };
-        const body = z.object({ id: z.string().min(1) }).parse(await response.json());
-        return { state: "accepted", providerId: `resend:${body.id}` };
+        if (result.ok) {
+          const messageId = result.ids[0]?.messageId;
+          return messageId
+            ? { state: "accepted", providerId: `void:${messageId}` }
+            : { state: "uncertain" };
+        }
+        const unknown =
+          "error" in result
+            ? result.error.code === "OUTCOME_UNKNOWN"
+            : result.deliveries.some(
+                (delivery) => !delivery.ok && delivery.error.code === "OUTCOME_UNKNOWN",
+              );
+        return { state: unknown ? "uncertain" : "failed" };
       }
       const response = await http("https://exp.host/--/api/v2/push/send", {
         method: "POST",
@@ -72,95 +79,35 @@ export function notificationTransport(env: Env, http: HttpClient = fetch): Trans
     }
   };
 }
-export async function verifyResendWebhook(
-  env: Env,
-  raw: string,
-  headers: Headers,
-  now = Date.now(),
-) {
-  if (!env.RESEND_WEBHOOK_SECRET?.startsWith("whsec_"))
-    throw new AppError(503, "RESEND_NOT_CONFIGURED");
-  const id = headers.get("svix-id") ?? "",
-    timestamp = headers.get("svix-timestamp") ?? "";
-  if (!id || !/^\d+$/.test(timestamp) || Math.abs(now - Number(timestamp) * 1000) > 300_000)
-    throw new AppError(401, "INVALID_SIGNATURE");
-  const secret = atob(env.RESEND_WEBHOOK_SECRET.slice(6));
-  // Svix signs with the decoded binary secret, not the UTF-8 representation of the Base64.
-  const key = await crypto.subtle.importKey(
-    "raw",
-    Uint8Array.from(secret, (c) => c.charCodeAt(0)),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["verify"],
-  );
-  const signed = new TextEncoder().encode(`${id}.${timestamp}.${raw}`);
-  let valid = false;
-  for (const entry of (headers.get("svix-signature") ?? "").split(" ")) {
-    const [version, signature] = entry.split(",");
-    if (version !== "v1" || !signature) continue;
-    try {
-      valid ||= await crypto.subtle.verify(
-        "HMAC",
-        key,
-        Uint8Array.from(atob(signature), (c) => c.charCodeAt(0)),
-        signed,
-      );
-    } catch {
-      /* Invalid candidate signature. */
-    }
-  }
-  if (!valid) throw new AppError(401, "INVALID_SIGNATURE");
-  return {
-    id,
-    event: z
-      .object({
-        type: z.string(),
-        data: z.object({ email_id: z.string(), tags: z.record(z.string(), z.string()).optional() }),
-      })
-      .parse(JSON.parse(raw)),
-  };
-}
-export async function processResendWebhook(
-  db: Database,
-  env: Env,
-  raw: string,
-  headers: Headers,
-  now = Date.now(),
-) {
-  const { id, event } = await verifyResendWebhook(env, raw, headers, now);
+// Only invoked by the Cloudflare Queue consumer, never an unauthenticated HTTP route.
+const emailEventSchema = z.object({
+  type: z.string(),
+  payload: z.object({ eventId: z.string().min(1), messageId: z.string().min(1) }),
+});
+export async function processEmailEvent(db: Database, body: unknown, now = Date.now()) {
+  const event = emailEventSchema.parse(body);
   const state =
-    event.type === "email.delivered"
+    event.type === "cf.email.sending.message.delivered"
       ? "delivered"
-      : ["email.bounced", "email.failed", "email.complained", "email.suppressed"].includes(
-            event.type,
+      : ["bounced", "failed", "rejected", "complained"].some(
+            (suffix) => event.type === `cf.email.sending.message.${suffix}`,
           )
         ? "failed"
         : null;
   if (!state) return;
-  await db.transaction(
-    async (tx) => {
-      // Match even if the HTTP request timed out after Resend accepted it.
-      const row =
-        (
-          await tx
-            .select()
-            .from(outbox)
-            .where(eq(outbox.providerId, `resend:${event.data.email_id}`))
-        )[0] ??
-        (event.data.tags?.outbox_id
-          ? (await tx.select().from(outbox).where(eq(outbox.id, event.data.tags.outbox_id)))[0]
-          : undefined);
-      if (!row) throw new AppError(503, "DELIVERY_NOT_RECORDED_YET");
-      const inserted = await tx
-        .insert(webhookEvents)
-        .values({ id: `resend:${id}`, createdAt: now })
-        .onConflictDoNothing()
-        .returning();
-      if (inserted.length)
-        await recordResult(tx, row.id, { state, providerId: `resend:${event.data.email_id}` }, now);
-    },
-    { behavior: "immediate" },
-  );
+  await atomic(db, async (tx) => {
+    const eventId = `cloudflare-email:${event.payload.eventId}`;
+    if ((await tx.select().from(webhookEvents).where(eq(webhookEvents.id, eventId))).length) return;
+    const row = (
+      await tx
+        .select()
+        .from(outbox)
+        .where(eq(outbox.providerId, `void:${event.payload.messageId}`))
+    )[0];
+    if (!row) throw new AppError(503, "DELIVERY_NOT_RECORDED_YET");
+    await tx.insert(webhookEvents).values({ id: eventId, createdAt: now });
+    await recordResult(tx, row.id, { state, providerId: row.providerId! }, now);
+  });
 }
 export async function pollExpoReceipts(
   db: Database,
@@ -213,8 +160,6 @@ export async function pollExpoReceipts(
         : receipt.details?.error === "DeviceNotRegistered"
           ? "failed"
           : "uncertain";
-    await db.transaction((tx) =>
-      recordResult(tx, job.id, { state, providerId: job.providerId! }, now),
-    );
+    await atomic(db, (tx) => recordResult(tx, job.id, { state, providerId: job.providerId! }, now));
   }
 }

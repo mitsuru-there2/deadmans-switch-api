@@ -1,7 +1,7 @@
-import certificate from "./fixtures/AppleRootCA-G3.cer";
+import certificate from "./fixtures/AppleRootCA-G3.cer?inline";
 import { renderNotice } from "../src/emails/notice";
 import { createStoreVerifier } from "../src/integrations/stores";
-import type { Env } from "../src/env";
+import type { Env } from "../src/config";
 
 // Isolated workerd compatibility check. No database, provider credentials or external delivery.
 export default {
@@ -13,7 +13,7 @@ export default {
       url: "https://example.jp/test",
     });
     const env = {
-      APPLE_ROOT_CERTIFICATES: JSON.stringify([Buffer.from(certificate).toString("base64")]),
+      APPLE_ROOT_CERTIFICATES: JSON.stringify([certificate.split(",")[1]]),
       APPLE_ENVIRONMENT: "Production",
       APPLE_BUNDLE_ID: "jp.example.app",
       APPLE_APP_ID: "123456789",

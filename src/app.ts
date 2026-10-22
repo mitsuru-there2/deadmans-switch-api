@@ -1,3 +1,4 @@
+import { atomic } from "./db/client";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
@@ -27,18 +28,14 @@ import {
   webhookEvents,
   storeSubscriptions,
 } from "./db/schema";
-import { parseEnv, type Env } from "./env";
+import { parseEnv, type Env } from "./config";
 import { secretEqual, verifySignature } from "./lib/crypto";
 import { DeviceAuthService } from "./services/device-auth";
 import { RestoreOperations } from "./services/restore-operations";
 import { AppError, requireValue } from "./lib/errors";
 import { rateLimit } from "./lib/rate-limit";
 import { dispatch, enqueue, recordResult, type Transport } from "./services/notifications";
-import {
-  notificationTransport,
-  pollExpoReceipts,
-  processResendWebhook,
-} from "./integrations/notifications";
+import { notificationTransport, pollExpoReceipts } from "./integrations/notifications";
 import { createStoreVerifier, productMap, type StoreVerifier } from "./integrations/stores";
 import { BillingService } from "./services/billing";
 import { probe, tick } from "./services/scheduler";
@@ -134,11 +131,7 @@ export function createApp(deps: AppDependencies = {}) {
       c.set("db", db);
       c.set("service", new SwitchService(db, env, now));
       c.set("auth", createAuth(db, env));
-      try {
-        await next();
-      } finally {
-        connection?.client.close();
-      }
+      await next();
     });
   });
   const billing = (db: Database, env: Env) =>
@@ -422,16 +415,6 @@ export function createApp(deps: AppDependencies = {}) {
         );
       },
     )
-    .post("/webhooks/resend", async (c) => {
-      await processResendWebhook(
-        c.get("db"),
-        c.get("config"),
-        await c.req.text(),
-        c.req.raw.headers,
-        now(),
-      );
-      return c.json({ received: true });
-    })
     .post("/webhooks/apple", async (c) => {
       const { signedPayload } = z
         .object({ signedPayload: z.string().min(1).max(100_000) })
@@ -711,26 +694,23 @@ export function createApp(deps: AppDependencies = {}) {
       }),
     )
     .post("/internal/recover", async (c) => {
-      await c.get("db").transaction(
-        async (tx) => {
-          const h = requireValue(
-            (await tx.select().from(systemHealth).where(eq(systemHealth.id, "scheduler")))[0],
-          );
-          if (
-            !h.lastProbeAt ||
-            !h.lastTickAt ||
-            now() - h.lastProbeAt > 300_000 ||
-            now() - h.lastTickAt > 300_000
-          )
-            throw new AppError(503, "MONITORING_UNHEALTHY");
-          await tx
-            .update(systemHealth)
-            .set({ incidentAt: null, recoveredAt: now() })
-            .where(eq(systemHealth.id, "scheduler"));
-          // Profiles remain held. Only explicit owner activation may restart them.
-        },
-        { behavior: "immediate" },
-      );
+      await atomic(c.get("db"), async (tx) => {
+        const h = requireValue(
+          (await tx.select().from(systemHealth).where(eq(systemHealth.id, "scheduler")))[0],
+        );
+        if (
+          !h.lastProbeAt ||
+          !h.lastTickAt ||
+          now() - h.lastProbeAt > 300_000 ||
+          now() - h.lastTickAt > 300_000
+        )
+          throw new AppError(503, "MONITORING_UNHEALTHY");
+        await tx
+          .update(systemHealth)
+          .set({ incidentAt: null, recoveredAt: now() })
+          .where(eq(systemHealth.id, "scheduler"));
+        // Profiles remain held. Only explicit owner activation may restart them.
+      });
       return c.json({ recovered: true });
     })
     .post("/internal/tick", async (c) => {
@@ -759,47 +739,41 @@ export function createApp(deps: AppDependencies = {}) {
       const event = webhookSchema.parse(JSON.parse(raw));
       if (event.type === "entitlement" && c.get("config").APP_ENV === "production")
         throw new AppError(403, "STORE_VERIFICATION_REQUIRED");
-      await c.get("db").transaction(
-        async (tx) => {
-          const inserted = await tx
-            .insert(webhookEvents)
-            .values({ id: event.id, createdAt: now() })
-            .onConflictDoNothing()
-            .returning();
-          if (!inserted.length) return;
-          if (event.type === "delivery") {
-            requireValue(
-              (
-                await tx.select({ id: outbox.id }).from(outbox).where(eq(outbox.id, event.outboxId))
-              )[0],
-            );
-            await recordResult(tx, event.outboxId, event, now());
-            return;
-          }
-          const p = requireValue(
-            (await tx.select().from(profiles).where(eq(profiles.userId, event.userId)))[0],
+      await atomic(c.get("db"), async (tx) => {
+        if ((await tx.select().from(webhookEvents).where(eq(webhookEvents.id, event.id))).length)
+          return;
+        await tx.insert(webhookEvents).values({ id: event.id, createdAt: now() });
+        if (event.type === "delivery") {
+          requireValue(
+            (
+              await tx.select({ id: outbox.id }).from(outbox).where(eq(outbox.id, event.outboxId))
+            )[0],
           );
-          const previous = (
-            await tx.select().from(entitlements).where(eq(entitlements.profileId, p.id))
-          )[0];
-          if (previous && previous.sourceVersion >= event.sourceVersion) return;
-          const values = {
-            profileId: p.id,
-            plan: event.plan,
-            status: event.status,
-            validUntil: event.validUntil,
-            sourceVersion: event.sourceVersion,
-          };
-          await tx
-            .insert(entitlements)
-            .values(values)
-            .onConflictDoUpdate({ target: entitlements.profileId, set: values });
-          if (!isEntitled(values, now()) && ["active", "grace", "released"].includes(p.state))
-            await invalidate(tx, p, "held", now(), "entitlement_inactive");
-          await log(tx, p, "entitlement_updated", now());
-        },
-        { behavior: "immediate" },
-      );
+          await recordResult(tx, event.outboxId, event, now());
+          return;
+        }
+        const p = requireValue(
+          (await tx.select().from(profiles).where(eq(profiles.userId, event.userId)))[0],
+        );
+        const previous = (
+          await tx.select().from(entitlements).where(eq(entitlements.profileId, p.id))
+        )[0];
+        if (previous && previous.sourceVersion >= event.sourceVersion) return;
+        const values = {
+          profileId: p.id,
+          plan: event.plan,
+          status: event.status,
+          validUntil: event.validUntil,
+          sourceVersion: event.sourceVersion,
+        };
+        await tx
+          .insert(entitlements)
+          .values(values)
+          .onConflictDoUpdate({ target: entitlements.profileId, set: values });
+        if (!isEntitled(values, now()) && ["active", "grace", "released"].includes(p.state))
+          await invalidate(tx, p, "held", now(), "entitlement_inactive");
+        await log(tx, p, "entitlement_updated", now());
+      });
       return c.json({ received: true });
     });
   app.notFound((c) => c.json({ error: { code: "NOT_FOUND" } }, 404));

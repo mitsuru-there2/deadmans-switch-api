@@ -123,14 +123,6 @@ route(
   [{ googleOidc: [] }],
 );
 route(
-  "post",
-  "/webhooks/resend",
-  "Resend events; raw body signed with Svix headers",
-  undefined,
-  200,
-  [{ svixId: [], svixTimestamp: [], svixSignature: [] }],
-);
-route(
   "get",
   "/v1/consents/current",
   "Current owner activation consent text and version; available before purchase",
@@ -262,9 +254,6 @@ export const openApiDocument = {
         description:
           "Google-signed OIDC JWT with configured audience and push service account email",
       },
-      svixId: { type: "apiKey", in: "header", name: "svix-id" },
-      svixTimestamp: { type: "apiKey", in: "header", name: "svix-timestamp" },
-      svixSignature: { type: "apiKey", in: "header", name: "svix-signature" },
       bearerAuth: { type: "http", scheme: "bearer" },
       cookieAuth: { type: "apiKey", in: "cookie", name: "__Secure-better-auth.session_token" },
       operationsAuth: {

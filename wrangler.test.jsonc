@@ -1,9 +1,0 @@
-{
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "deadmans-switch-runtime-test",
-  "main": "tests/runtime-worker.ts",
-  "compatibility_date": "2026-10-13",
-  "compatibility_flags": ["nodejs_compat"],
-  "workers_dev": false,
-  "rules": [{ "type": "Data", "globs": ["**/*.cer"], "fallthrough": true }],
-}

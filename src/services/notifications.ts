@@ -1,3 +1,4 @@
+import { atomic } from "../db/client";
 import { and, count, eq, inArray, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Database, DbOrTx } from "../db/client";
@@ -10,7 +11,7 @@ import {
   releases,
   devices,
 } from "../db/schema";
-import type { Env } from "../env";
+import type { Env } from "../config";
 import { hash, Vault } from "../lib/crypto";
 
 export interface Notice {
@@ -117,91 +118,87 @@ export async function dispatch(
     .limit(50);
   for (const candidate of jobs) {
     const now = clock();
-    const job = await db.transaction(
-      async (tx) => {
-        const row = (
-          await tx
-            .select()
-            .from(outbox)
-            .where(and(eq(outbox.id, candidate.id), eq(outbox.state, "pending")))
-        )[0];
-        if (!row) return null;
-        const notice = await vault.open<Notice>(row.payload, `outbox:${row.id}`);
-        // Cancel legacy SMS jobs before any transport or operational checks.
-        if (notice.channel === "sms") {
-          await tx
-            .update(outbox)
-            .set({ state: "cancelled", payload: "" })
-            .where(eq(outbox.id, row.id));
-          return null;
-        }
-        let valid = !notice.expiresAt || notice.expiresAt > now;
-        if (row.profileId && row.version !== null) {
-          const p = (await tx.select().from(profiles).where(eq(profiles.id, row.profileId)))[0];
-          valid &&= !!p && p.version === row.version;
-          if (row.kind === "final" || row.kind === "warning" || row.kind === "reminder") {
-            const health = (
-              await tx.select().from(systemHealth).where(eq(systemHealth.id, "scheduler"))
-            )[0];
-            const healthy =
-              !!health?.lastTickAt &&
-              now - health.lastTickAt <= 300_000 &&
-              !!health.lastProbeAt &&
-              now - health.lastProbeAt <= 300_000 &&
-              !health.incidentAt;
-            const e = (
-              await tx.select().from(entitlements).where(eq(entitlements.profileId, row.profileId))
-            )[0];
-            const recipientCount = (
-              await tx
-                .select({ value: count() })
-                .from(recipients)
-                .where(eq(recipients.profileId, row.profileId))
-            )[0]!.value;
-            const entitled =
-              !!e &&
-              (e.status === "active" || e.status === "grace") &&
-              e.validUntil > now &&
-              recipientCount <= (e.plan === "plus" ? 50 : 10);
-            // Kill switch / operational hold preserve pending work, and never cause a burst on recovery.
-            if (env.DELIVERY_ENABLED !== "true" || !healthy) return null;
-            valid &&=
-              entitled &&
-              !!p &&
-              (row.kind === "final"
-                ? p.state === "released"
-                : row.kind === "warning"
-                  ? p.state === "grace"
-                  : p.state === "active");
-          }
-        }
-        if (row.recipientId) {
-          const recipient = (
-            await tx.select().from(recipients).where(eq(recipients.id, row.recipientId))
-          )[0];
-          valid &&=
-            !!recipient &&
-            (row.kind === "invitation"
-              ? recipient.status === "pending"
-              : recipient.status === "accepted");
-        }
-        if (row.kind === "reminder") valid &&= !!row.deviceId;
-        if (!valid) {
-          await tx
-            .update(outbox)
-            .set({ state: "cancelled", payload: "" })
-            .where(eq(outbox.id, row.id));
-          return null;
-        }
-        const claimed = await tx
+    const job = await atomic(db, async (tx) => {
+      const row = (
+        await tx
+          .select()
+          .from(outbox)
+          .where(and(eq(outbox.id, candidate.id), eq(outbox.state, "pending")))
+      )[0];
+      if (!row) return null;
+      const notice = await vault.open<Notice>(row.payload, `outbox:${row.id}`);
+      // Cancel legacy SMS jobs before any transport or operational checks.
+      if (notice.channel === "sms") {
+        await tx
           .update(outbox)
-          .set({ state: "sending", claimedAt: now, attempts: sql`${outbox.attempts} + 1` })
-          .where(and(eq(outbox.id, row.id), eq(outbox.state, "pending")))
-          .returning();
-        return claimed.length ? { row, notice } : null;
-      },
-      { behavior: "immediate" },
-    );
+          .set({ state: "cancelled", payload: "" })
+          .where(eq(outbox.id, row.id));
+        return null;
+      }
+      let valid = !notice.expiresAt || notice.expiresAt > now;
+      if (row.profileId && row.version !== null) {
+        const p = (await tx.select().from(profiles).where(eq(profiles.id, row.profileId)))[0];
+        valid &&= !!p && p.version === row.version;
+        if (row.kind === "final" || row.kind === "warning" || row.kind === "reminder") {
+          const health = (
+            await tx.select().from(systemHealth).where(eq(systemHealth.id, "scheduler"))
+          )[0];
+          const healthy =
+            !!health?.lastTickAt &&
+            now - health.lastTickAt <= 300_000 &&
+            !!health.lastProbeAt &&
+            now - health.lastProbeAt <= 300_000 &&
+            !health.incidentAt;
+          const e = (
+            await tx.select().from(entitlements).where(eq(entitlements.profileId, row.profileId))
+          )[0];
+          const recipientCount = (
+            await tx
+              .select({ value: count() })
+              .from(recipients)
+              .where(eq(recipients.profileId, row.profileId))
+          )[0]!.value;
+          const entitled =
+            !!e &&
+            (e.status === "active" || e.status === "grace") &&
+            e.validUntil > now &&
+            recipientCount <= (e.plan === "plus" ? 50 : 10);
+          // Kill switch / operational hold preserve pending work, and never cause a burst on recovery.
+          if (env.DELIVERY_ENABLED !== "true" || !healthy) return null;
+          valid &&=
+            entitled &&
+            !!p &&
+            (row.kind === "final"
+              ? p.state === "released"
+              : row.kind === "warning"
+                ? p.state === "grace"
+                : p.state === "active");
+        }
+      }
+      if (row.recipientId) {
+        const recipient = (
+          await tx.select().from(recipients).where(eq(recipients.id, row.recipientId))
+        )[0];
+        valid &&=
+          !!recipient &&
+          (row.kind === "invitation"
+            ? recipient.status === "pending"
+            : recipient.status === "accepted");
+      }
+      if (row.kind === "reminder") valid &&= !!row.deviceId;
+      if (!valid) {
+        await tx
+          .update(outbox)
+          .set({ state: "cancelled", payload: "" })
+          .where(eq(outbox.id, row.id));
+        return null;
+      }
+      await tx
+        .update(outbox)
+        .set({ state: "sending", claimedAt: now, attempts: sql`${outbox.attempts} + 1` })
+        .where(and(eq(outbox.id, row.id), eq(outbox.state, "pending")));
+      return { row, notice };
+    });
     if (!job) continue;
     let result: TransportResult;
     try {
@@ -209,22 +206,19 @@ export async function dispatch(
     } catch {
       result = { state: "uncertain" };
     }
-    await db.transaction(
-      async (tx) => {
-        await recordResult(tx, job.row.id, result, clock());
-        if (result.state === "failed" && job.notice.channel === "push" && job.row.profileId) {
-          await tx
-            .delete(devices)
-            .where(
-              and(
-                eq(devices.profileId, job.row.profileId),
-                eq(devices.tokenHash, await hash(job.notice.to)),
-              ),
-            );
-        }
-      },
-      { behavior: "immediate" },
-    );
+    await atomic(db, async (tx) => {
+      await recordResult(tx, job.row.id, result, clock());
+      if (result.state === "failed" && job.notice.channel === "push" && job.row.profileId) {
+        await tx
+          .delete(devices)
+          .where(
+            and(
+              eq(devices.profileId, job.row.profileId),
+              eq(devices.tokenHash, await hash(job.notice.to)),
+            ),
+          );
+      }
+    });
   }
 }
 export async function recordResult(
@@ -233,27 +227,25 @@ export async function recordResult(
   result: TransportResult | { state: "delivered"; providerId: string },
   now: number,
 ) {
+  const allowed =
+    result.state === "failed"
+      ? (["sending", "uncertain", "accepted", "delivered"] as const)
+      : (["sending", "uncertain", "accepted"] as const);
   const row = (
     await db
-      .update(outbox)
-      .set({
-        state: result.state,
-        providerId: "providerId" in result ? result.providerId : null,
-        ...(result.state === "accepted" || result.state === "delivered" ? { payload: "" } : {}),
-      })
-      .where(
-        and(
-          eq(outbox.id, id),
-          inArray(
-            outbox.state,
-            result.state === "failed"
-              ? ["sending", "uncertain", "accepted", "delivered"]
-              : ["sending", "uncertain", "accepted"],
-          ),
-        ),
-      )
-      .returning()
+      .select()
+      .from(outbox)
+      .where(and(eq(outbox.id, id), inArray(outbox.state, [...allowed])))
   )[0];
+  if (!row) return;
+  await db
+    .update(outbox)
+    .set({
+      state: result.state,
+      providerId: "providerId" in result ? result.providerId : null,
+      ...(result.state === "accepted" || result.state === "delivered" ? { payload: "" } : {}),
+    })
+    .where(eq(outbox.id, id));
   if (row?.deviceId && result.state === "failed")
     await db.delete(devices).where(eq(devices.id, row.deviceId));
   if (row?.kind === "warning" && row.profileId && row.version !== null) {
@@ -271,6 +263,16 @@ export async function recordResult(
         );
     } else if (result.state === "failed") {
       const held = await db
+        .select()
+        .from(profiles)
+        .where(
+          and(
+            eq(profiles.id, row.profileId),
+            eq(profiles.version, row.version),
+            inArray(profiles.state, ["grace", "released"]),
+          ),
+        );
+      await db
         .update(profiles)
         .set({
           state: "held",
@@ -284,8 +286,7 @@ export async function recordResult(
             eq(profiles.version, row.version),
             inArray(profiles.state, ["grace", "released"]),
           ),
-        )
-        .returning();
+        );
       if (held.length) {
         await db
           .update(releases)

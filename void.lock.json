@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "source": {
+    "name": "deadmans-switch-api",
+    "workers_dev": false,
+    "preview_urls": false,
+    "observability": {
+      "enabled": false
+    }
+  },
+  "resolved": {
+    "name": "deadmans-switch-api",
+    "workers_dev": false,
+    "preview_urls": false,
+    "observability": {
+      "enabled": false
+    }
+  },
+  "text": "{\n  \"name\": \"deadmans-switch-api\",\n  \"workers_dev\": false,\n  \"preview_urls\": false,\n  \"observability\": {\n    \"enabled\": false\n  }\n}\n"
+}

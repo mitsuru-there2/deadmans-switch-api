@@ -2,7 +2,7 @@ import { storeAccountMatches } from "./store-account";
 import type { SignedDataVerifier } from "@apple/app-store-server-library";
 import { createRemoteJWKSet, importPKCS8, jwtVerify, SignJWT } from "jose";
 import { z } from "zod";
-import type { Env } from "../env";
+import type { Env } from "../config";
 import { AppError } from "../lib/errors";
 import type { HttpClient } from "./notifications";
 

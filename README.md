@@ -2,47 +2,36 @@
 
 一定期間の本人確認がなく、メールによる警告と猶予期間を経過したとき、宛先ごとの伝言の閲覧入口を通知するAPIです。死亡判定は行いません。
 
-Cloudflare Workers / Hono / Turso (libSQL・SQLite) / Drizzle ORM / Better Auth / Bun。メールはResend + React Email、プッシュはExpo、課金はApp Store / Google Playのサブスクに対応します。整形はOxfmt、LintはOxlint、テストは`bun test`です。
+Void 1.2.1 / Cloudflare Workers / D1 (SQLite) / Drizzle ORM / Hono / Better Auth / Bun。メールは `void/email` のCloudflare送信とReact Email、プッシュはExpo、課金はApp Store / Google Playを利用します。API・DB・定期実行・メールの開発とデプロイはVoidへ統一しています。
 
 ## ローカルで起動する
 
-Bun 1.3.14、Docker Compose v2、起動済みのOrbStackが必要です。
+Bun 1.3.14と、Void同梱のVite／workerdを実行できるNode.jsが必要です。
 
 ```sh
 bun install --frozen-lockfile
 bun run setup:local
-bun run db:up
+bun run prepare
 bun run db:migrate
-```
-
-ターミナルを2つ使って起動します。
-
-```sh
-# ターミナル1: 外部送信しない通知キャプチャ
-bun run notifications:dev
-
-# ターミナル2: Workersローカル実行
 bun run dev
 ```
 
-APIは`http://localhost:8787`、libSQLは`http://127.0.0.1:8080`です。DBはComposeの名前付きボリュームに保存されます。ホストのループバックだけに公開します。
+APIと受取Webは `http://localhost:8787`。D1はVoidがローカルで管理し、Dockerや別DBサーバーは不要です。環境変数はルートの `.env` に保存します。既存のローカル秘密値は移行時に引き継ぎ、旧ファイルは `.local/legacy-dev.vars` に保管しています。新しいcloneでは `setup:local` が開発専用の値を生成します。
 
-```sh
-bun run test:smoke  # 起動済みWorkers・DB・通知キャプチャで認証から削除まで検証
-bun run check       # 型・Lint・Format・bun test
-bun run build       # Workersバンドルのdry-run。本番へ送信しない
-bun run test:runtime # React EmailとApple検証器を実際のworkerdで検証
-```
-
-メールリンクを要求すると、暗号化したOutboxに入ります。ローカルでは以下で配信処理を進めます（`wrangler dev`はCronを自動実行しません）。
+`void/email` は開発中のメールを外部送信せず、起動ログに表示するVoid受信箱へ保存します。認証リンクを含むため、受信箱のトークンと `.env` は共有しないでください。Cronはローカルで自動実行されません。Outboxの処理は次で進めます。
 
 ```sh
 bun run local tick
+bun run check        # 型・Lint・Format・サービス/APIテスト
+bun run build        # Voidの本番バンドル生成
+bun run test:runtime # 一時D1とVoid実workerdでメール確認・復旧・削除を検証
 ```
 
-通知内容は`.local/mailbox/*.json`で確認できます。**ローカル用ファイルには認証リンク・宛先が含まれます。共有しないでください。** キャプチャはメール・プッシュを外部へ送信しません。実配信されたことの検証にはなりません。
+`test:runtime` はローカルサーバーを一時起動し、React EmailのレンダリングとApple偽造署名の拒否も確認します。`bun run test:smoke` は起動済みの開発サーバーへ同じAPIフローを実行します。停止はCtrl+C。DBは保持されます。
 
-停止時はAPI・キャプチャのターミナルでCtrl+C、DBは`bun run db:down`。`docker compose down -v`はDBも削除するため、通常の停止では使いません。
+## リポジトリ限定のVoidスキル
+
+公式 `bunx void init` で `AGENTS.md` と `.agents/skills/void`、`.agents/skills/migrate-vite-cloudflare-to-void` を導入しました。スキルはこのリポジトリの `node_modules/void/skills/` への相対リンクです。グローバルのスキル設定は変更していません。手順はインストール済みの `node_modules/void/docs/` を参照します。
 
 ## ログイン操作なしの利用開始
 
@@ -71,12 +60,12 @@ bun run local tick
 - Cronや確認APIの監視断、契約失効、警告不達、配信停止スイッチによる保留
 - Expo端末トークン管理、日常プッシュ、自分宛の固定テスト通知
 - 10件/50件の契約権利、Apple/Googleサブスクのサーバー検証・復元・Webhook・定期再照会
-- Resend + React Emailによる日本語メール、署名付き配信結果、Expoのticket/receipt照合
+- Void + React Emailによる日本語メール、Cloudflare Queuesでの配信結果、Expoのticket/receipt照合
 - AES-256-GCMによる宛先・本文・端末トークン・Outboxの暗号化と鍵世代管理
 - 本番の日本国外アクセス拒否
 - `/openapi.json`、マイグレーション、CI、単体・APIテスト、ローカル実環境スモークテスト
 
-Resend・Expo・Apple/GoogleのAPI接続と検証コードを実装しています。実際の送信・購入試験には各サービスの資格情報、ストアの商品設定、通知先URLが必要です。SMSは次期フェーズ対応です。初期フェーズの受信者への最終通知はメールのみで、SMS宛先の登録・送信はできません。受信者Web画面（招待・メール認証・開封前確認・本文表示）は同じHonoに含みます。Expoアプリは別リポジトリです。Cloudflare/Tursoへのリソース作成・本番デプロイは行っていません。
+Voidメール・Expo・Apple/Googleの接続と検証コードを実装しています。実際の送信・購入試験には各サービスの資格情報、ストアの商品設定、通知先URLが必要です。SMSは次期フェーズ対応です。初期フェーズの受信者への最終通知はメールのみで、SMS宛先の登録・送信はできません。受信者Web画面（招待・メール認証・開封前確認・本文表示）は同じHonoに含みます。Expoアプリは別リポジトリです。Cloudflareへの本番リソース作成・本番デプロイは行っていません。
 
 ## 初期仕様
 
@@ -110,29 +99,34 @@ bun run local recover
 bun run local grant USER_ID
 ```
 
-宛先を招待し、受信者のメールリンクでログインして承諾、自分宛テストを受付させた後、有効化します。フロントエンドが未実装のため、招待・閲覧は[API仕様](docs/api.md)のJSONリクエストで試します。日数を待たない状態遷移の検証は、注入した時計を進める`bun test`で行います。
+宛先を招待し、受信者のメールリンクでログインして承諾、自分宛テストを受付させた後、有効化します。招待・閲覧は同居する受取Webまたは[API仕様](docs/api.md)のJSONリクエストで試します。日数を待たない状態遷移の検証は、注入した時計を進める`bun test`で行います。
 
 ## 本番設定
 
 利用者とDBを日本国内に限定する方針です。`request.cf.country`を使い、国外・国不明の一般APIアクセスを拒否します。IPベースの国判定は居住地の証明ではありません。内部運用・署名付きWebhookには別の認証を設けています。
 
-Tursoの**東京（`nrt`）プライマリと日本国内だけの配置**を管理側で確認し、海外レプリカを追加しません。`TURSO_LOCATION=nrt`は誤設定を検出する宣言値であり、リモートDBの実際の配置を証明するものではありません。Workersの`aws:ap-northeast-1`は東京近傍への配置ヒントです。国内での全処理を保証する設定ではなく、今回の「利用者とDBが日本国内」の要件に合わせています。[Cloudflare公式の配置仕様](https://developers.cloudflare.com/workers/configuration/placement/)
+D1は配置ヒントが日本国内固定の保証にはなりません。従来の東京DB固定という説明は撤回し、本番導入時にデータ所在地の要件を確認します。安全に関わる判定はD1のprimary bindingを使い、リードレプリカの遅延で失効済みリンクを再開しません。[D1のデータ配置](https://developers.cloudflare.com/d1/configuration/data-location/)
 
-本番では`wrangler.jsonc`の`env.production`にドメイン・URLを設定し、DBと各種秘密鍵をWrangler Secretsへ登録します。詳細な設定と復旧・バックアップ手順は[運用手順](docs/operations.md)にあります。
+設定は `void.config.ts`、環境変数スキーマは `env.ts`、本番の値は `void secret put` で管理します。本番送信元ドメイン、Workers PaidのEmail Sending、カスタムドメインと独立プローブは未設定です。[運用手順](docs/operations.md)に沿って接続してください。
 
 ## 構成と参照元
 
-- `src/app.ts`: HTTP、認証・地域制限、各ルート
+- `routes/` / `src/void-handler.ts` / `src/app.ts`: VoidのURL別ルート、既存HTTP契約と認証・地域制限
 - `src/contracts.ts` / `src/openapi.ts`: 入力検証と機械可読仕様
 - `src/services/switch.ts`: 所有権、編集、同意、本人確認、失効
 - `src/services/scheduler.ts`: 期限判定、警告、スナップショット、障害保留
 - `src/services/notifications.ts`: Outbox、送信直前検査、受付と結果照合
-- `src/db/schema.ts` / `drizzle/`: DrizzleスキーマとSQLマイグレーション
+- `db/schema.ts` / `src/db/schema.ts` / `db/migrations/`: DrizzleスキーマとSQLマイグレーション
 - `src/auth.ts` / `src/services/device-auth.ts` / `src/lib/crypto.ts`: 復旧・受信者のBetter Auth認証、本人の端末認証、保存時暗号化
-- `src/integrations/` / `src/services/billing.ts`: Resend、Expo、Apple/Google検証・契約更新
+- `src/integrations/` / `src/services/billing.ts`: Voidメール、Expo、Apple/Google検証・契約更新
 - `src/emails/notice.ts`: React Emailの日本語テンプレート
 
-要件の参照元は[企画](https://chatgpt.com/space/page_7015eddc4d3c81919a5746fe47c291d0)と[システム構成案](https://chatgpt.com/space/page_f1c38b2175b88191a1061ead9ba6e9ee)（2026-10-12版）です。構成案のPostgreSQLは今回の指定でTurso/SQLiteへ、本人の認証案はストア検証＋端末用認証情報へ変更し、メールリンクは連絡先確認・復旧・受信者認証に使います。
+- `crons/monitor.ts`: Void Cronで毎分の監視・通知・契約再検証
+- `queues/email-events.ts`: Cloudflare Email Sendingの配信イベント受信
+- `src/db/client.ts`: D1の原子的なバッチと競合検査
+- `env.ts` / `void.config.ts` / `vite.config.ts`: Void設定と型付き環境変数
+
+要件の参照元は[企画](https://chatgpt.com/space/page_7015eddc4d3c81919a5746fe47c291d0)と[システム構成案](https://chatgpt.com/space/page_f1c38b2175b88191a1061ead9ba6e9ee)です。2026-10-23にサーバー基盤をVoidへ変更しました。Expoアプリ向けのHono Client、認証、課金、停止・開封同意のHTTP契約は維持しています。
 
 ## 受取Webのローカル確認
 

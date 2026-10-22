@@ -1,3 +1,4 @@
+import { atomic } from "../db/client";
 import { and, eq, gt, inArray, lte, or } from "drizzle-orm";
 import type { Database, Tx } from "../db/client";
 import {
@@ -7,7 +8,7 @@ import {
   storeSubscriptions,
   user,
 } from "../db/schema";
-import type { Env } from "../env";
+import type { Env } from "../config";
 import type { RestorePurchaseProof } from "../integrations/stores";
 import { hash, Vault } from "../lib/crypto";
 import { AppError } from "../lib/errors";
@@ -46,76 +47,65 @@ export class RestoreOperations {
           : { store: proof.store, purchaseToken: proof.purchaseToken },
       ),
     );
-    return this.db.transaction(
-      async (tx) => {
-        const existing = (
-          await tx
-            .select()
-            .from(restoreOperations)
-            .where(
-              or(
-                eq(restoreOperations.sourceTokenHash, sourceTokenHash),
-                eq(restoreOperations.secretHash, secretHash),
-              ),
-            )
-        )[0];
-        if (existing) {
-          if (
-            existing.sourceTokenHash !== sourceTokenHash ||
-            existing.secretHash !== secretHash ||
-            existing.requestHash !== requestHash
+    return atomic(this.db, async (tx) => {
+      const existing = (
+        await tx
+          .select()
+          .from(restoreOperations)
+          .where(
+            or(
+              eq(restoreOperations.sourceTokenHash, sourceTokenHash),
+              eq(restoreOperations.secretHash, secretHash),
+            ),
           )
-            throw new AppError(409, "RESTORE_OPERATION_CONFLICT");
-          if (existing.expiresAt <= this.now())
-            throw new AppError(409, "RESTORE_OPERATION_EXPIRED");
-          if (existing.state === "failed") throw new AppError(409, "RESTORE_OPERATION_FAILED");
-          return existing;
-        }
-        const credential = (
-          await tx
-            .select()
-            .from(deviceCredentials)
-            .where(
-              and(
-                eq(deviceCredentials.userId, userId),
-                eq(deviceCredentials.tokenHash, sourceTokenHash),
-                gt(deviceCredentials.expiresAt, this.now()),
-              ),
-            )
-        )[0];
-        if (!credential) throw new AppError(401, "DEVICE_AUTHENTICATION_REQUIRED");
-        const p = (await tx.select().from(profiles).where(eq(profiles.userId, userId)))[0];
-        const u = (await tx.select().from(user).where(eq(user.id, userId)))[0];
-        const purchases = p
-          ? await tx
-              .select({ id: storeSubscriptions.id })
-              .from(storeSubscriptions)
-              .where(eq(storeSubscriptions.profileId, p.id))
-              .limit(1)
-          : [];
+      )[0];
+      if (existing) {
         if (
-          !p ||
-          !u ||
-          u.emailVerified ||
-          p.version !== 1 ||
-          p.state !== "draft" ||
-          purchases.length
+          existing.sourceTokenHash !== sourceTokenHash ||
+          existing.secretHash !== secretHash ||
+          existing.requestHash !== requestHash
         )
-          throw new AppError(409, "RESTORE_REQUIRES_FRESH_DEVICE_IDENTITY");
-        const value = {
-          id: crypto.randomUUID(),
-          sourceTokenHash,
-          secretHash,
-          requestHash,
-          state: "pending" as const,
-          expiresAt: Math.min(this.now() + RESTORE_RESULT_TTL, credential.expiresAt),
-          purgeAt: this.now() + DAY,
-        };
-        await tx.insert(restoreOperations).values(value);
-        return value;
-      },
-      { behavior: "immediate" },
-    );
+          throw new AppError(409, "RESTORE_OPERATION_CONFLICT");
+        if (existing.expiresAt <= this.now()) throw new AppError(409, "RESTORE_OPERATION_EXPIRED");
+        if (existing.state === "failed") throw new AppError(409, "RESTORE_OPERATION_FAILED");
+        return existing;
+      }
+      const credential = (
+        await tx
+          .select()
+          .from(deviceCredentials)
+          .where(
+            and(
+              eq(deviceCredentials.userId, userId),
+              eq(deviceCredentials.tokenHash, sourceTokenHash),
+              gt(deviceCredentials.expiresAt, this.now()),
+            ),
+          )
+      )[0];
+      if (!credential) throw new AppError(401, "DEVICE_AUTHENTICATION_REQUIRED");
+      const p = (await tx.select().from(profiles).where(eq(profiles.userId, userId)))[0];
+      const u = (await tx.select().from(user).where(eq(user.id, userId)))[0];
+      const purchases = p
+        ? await tx
+            .select({ id: storeSubscriptions.id })
+            .from(storeSubscriptions)
+            .where(eq(storeSubscriptions.profileId, p.id))
+            .limit(1)
+        : [];
+      if (!p || !u || u.emailVerified || p.version !== 1 || p.state !== "draft" || purchases.length)
+        throw new AppError(409, "RESTORE_REQUIRES_FRESH_DEVICE_IDENTITY");
+      const value = {
+        id: crypto.randomUUID(),
+        sourceTokenHash,
+        secretHash,
+        requestHash,
+        state: "pending" as const,
+        expiresAt: Math.min(this.now() + RESTORE_RESULT_TTL, credential.expiresAt),
+        purgeAt: this.now() + DAY,
+      };
+      await tx.insert(restoreOperations).values(value);
+      return value;
+    });
   }
   async inspect(tx: Tx, operation: RestoreOperation) {
     const row = (
@@ -203,73 +193,67 @@ export class RestoreOperations {
     if (!/^dms_[A-Za-z0-9_-]{43}$/.test(token)) throw unavailable();
     const sourceTokenHash = await hash(token),
       secretHash = await hash(secret);
-    return this.db.transaction(
-      async (tx) => {
-        const row = (
-          await tx
-            .select()
-            .from(restoreOperations)
-            .where(
-              and(
-                eq(restoreOperations.sourceTokenHash, sourceTokenHash),
-                eq(restoreOperations.secretHash, secretHash),
-              ),
-            )
-        )[0];
-        if (!row || row.expiresAt <= this.now()) throw unavailable();
-        if (row.state === "completed")
-          return {
-            status: "completed" as const,
-            session: await this.session(tx, row),
-            expiresAt: row.expiresAt,
-          };
-        // Pending/failed information is available only while that fresh device remains valid.
-        const source = (
-          await tx
-            .select({ id: deviceCredentials.id })
-            .from(deviceCredentials)
-            .where(
-              and(
-                eq(deviceCredentials.tokenHash, sourceTokenHash),
-                gt(deviceCredentials.expiresAt, this.now()),
-              ),
-            )
-        )[0];
-        if (!source) throw unavailable();
-        if (row.state === "failed")
-          return {
-            status: "failed" as const,
-            error: { code: row.errorCode ?? "RESTORE_OPERATION_FAILED" },
-            expiresAt: row.expiresAt,
-          };
-        return { status: "pending" as const, expiresAt: row.expiresAt };
-      },
-      { behavior: "immediate" },
-    );
+    return atomic(this.db, async (tx) => {
+      const row = (
+        await tx
+          .select()
+          .from(restoreOperations)
+          .where(
+            and(
+              eq(restoreOperations.sourceTokenHash, sourceTokenHash),
+              eq(restoreOperations.secretHash, secretHash),
+            ),
+          )
+      )[0];
+      if (!row || row.expiresAt <= this.now()) throw unavailable();
+      if (row.state === "completed")
+        return {
+          status: "completed" as const,
+          session: await this.session(tx, row),
+          expiresAt: row.expiresAt,
+        };
+      // Pending/failed information is available only while that fresh device remains valid.
+      const source = (
+        await tx
+          .select({ id: deviceCredentials.id })
+          .from(deviceCredentials)
+          .where(
+            and(
+              eq(deviceCredentials.tokenHash, sourceTokenHash),
+              gt(deviceCredentials.expiresAt, this.now()),
+            ),
+          )
+      )[0];
+      if (!source) throw unavailable();
+      if (row.state === "failed")
+        return {
+          status: "failed" as const,
+          error: { code: row.errorCode ?? "RESTORE_OPERATION_FAILED" },
+          expiresAt: row.expiresAt,
+        };
+      return { status: "pending" as const, expiresAt: row.expiresAt };
+    });
   }
 }
 
 export async function purgeRestoreResults(db: Database, now: number) {
-  await db.transaction(
-    async (tx) => {
-      // An abandoned fresh credential must not start the old operation again after its tombstone is purged.
-      await tx
-        .delete(deviceCredentials)
-        .where(
-          inArray(
-            deviceCredentials.tokenHash,
-            tx
-              .select({ hash: restoreOperations.sourceTokenHash })
-              .from(restoreOperations)
-              .where(lte(restoreOperations.expiresAt, now)),
-          ),
-        );
-      await tx
-        .update(restoreOperations)
-        .set({ result: null, resultTokenHash: null })
-        .where(lte(restoreOperations.expiresAt, now));
-      await tx.delete(restoreOperations).where(lte(restoreOperations.purgeAt, now));
-    },
-    { behavior: "immediate" },
-  );
+  await atomic(db, async (tx) => {
+    // An abandoned fresh credential must not start the old operation again after its tombstone is purged.
+    await tx
+      .delete(deviceCredentials)
+      .where(
+        inArray(
+          deviceCredentials.tokenHash,
+          tx
+            .select({ hash: restoreOperations.sourceTokenHash })
+            .from(restoreOperations)
+            .where(lte(restoreOperations.expiresAt, now)),
+        ),
+      );
+    await tx
+      .update(restoreOperations)
+      .set({ result: null, resultTokenHash: null })
+      .where(lte(restoreOperations.expiresAt, now));
+    await tx.delete(restoreOperations).where(lte(restoreOperations.purgeAt, now));
+  });
 }

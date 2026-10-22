@@ -330,3 +330,9 @@ export const storeSubscriptions = sqliteTable(
     index("subscription_refresh_idx").on(t.nextCheckAt),
   ],
 );
+
+// Internal commit revision. Every application table has mutation triggers (see migrations).
+export const d1Revision = sqliteTable("_d1_revision", {
+  id: integer().primaryKey(),
+  revision: integer().notNull().default(0),
+});

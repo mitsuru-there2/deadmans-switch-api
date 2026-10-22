@@ -1,23 +1,20 @@
-import { createClient } from "@libsql/client";
-import { drizzle } from "drizzle-orm/libsql";
-import { migrate } from "drizzle-orm/libsql/migrator";
+import { testD1 } from "./d1";
+import { connectDb } from "../src/db/client";
 import { eq } from "drizzle-orm";
 import * as schema from "../src/db/schema";
 import { createApp } from "../src/app";
-import type { Env } from "../src/env";
+import type { Env } from "../src/config";
 import { CONSENT_VERSION, DAY, SwitchService } from "../src/services/switch";
 import { dispatch, enqueue, type Notice, type Transport } from "../src/services/notifications";
 import type { StoreVerifier } from "../src/integrations/stores";
 
 export async function fixture(storeVerifier?: StoreVerifier) {
-  const client = createClient({ url: ":memory:" });
-  await client.execute("PRAGMA foreign_keys = ON");
-  const db = drizzle(client, { schema });
-  await migrate(db, { migrationsFolder: "./drizzle" });
+  const { client, binding } = testD1();
+  const { db } = connectDb({ DB: binding });
   const env: Env = {
     APP_ENV: "test",
-    TURSO_DATABASE_URL: "http://127.0.0.1:8080",
-    TURSO_LOCATION: "local",
+    DB: binding,
+    NOTIFICATION_DRIVER: "gateway",
     BETTER_AUTH_URL: "http://localhost:8787",
     BETTER_AUTH_SECRET: "test-secret-abcdefghijklmnopqrstuvwxyz0123456789",
     TRUSTED_ORIGINS: "http://localhost:3000",

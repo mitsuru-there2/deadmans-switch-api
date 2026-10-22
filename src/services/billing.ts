@@ -1,3 +1,4 @@
+import { atomic } from "../db/client";
 import { and, eq, inArray, lte } from "drizzle-orm";
 import type { Database, Tx } from "../db/client";
 import {
@@ -7,7 +8,7 @@ import {
   storeSubscriptions,
   webhookEvents,
 } from "../db/schema";
-import type { Env } from "../env";
+import type { Env } from "../config";
 import { hash, Vault } from "../lib/crypto";
 import { AppError, requireValue } from "../lib/errors";
 import {
@@ -20,12 +21,14 @@ import {
 import { storeAccountMatches } from "../integrations/store-account";
 import { DAY, invalidate, log, recipientLimit } from "./switch";
 
-async function aggregate(tx: Tx, profileId: string, now: number) {
+async function aggregate(
+  tx: Tx,
+  profileId: string,
+  now: number,
+  planned: Array<typeof storeSubscriptions.$inferSelect>,
+) {
   const p = requireValue((await tx.select().from(profiles).where(eq(profiles.id, profileId)))[0]);
-  const all = await tx
-    .select()
-    .from(storeSubscriptions)
-    .where(eq(storeSubscriptions.profileId, profileId));
+  const all = planned;
   const valid = all.filter(
     (s) => ["active", "grace"].includes(s.status) && s.validUntil > now && s.verifiedAt + DAY > now,
   );
@@ -165,94 +168,99 @@ export class BillingService {
     const linkedHash = verified.linkedReference
       ? await hash(`${verified.store}:${verified.linkedReference}`)
       : undefined;
-    return this.db.transaction(
-      async (tx) => {
-        const p = requireValue(
-          (await tx.select().from(profiles).where(eq(profiles.id, verified.accountToken)))[0],
-          "PURCHASE_ACCOUNT_NOT_FOUND",
-        );
-        if (eventId) {
-          const applied = await tx
-            .insert(webhookEvents)
-            .values({ id: eventId, createdAt: startedAt })
-            .onConflictDoNothing()
-            .returning();
-          if (!applied.length) return { received: true };
-        }
-        const current = (
+    return atomic(this.db, async (tx) => {
+      const p = requireValue(
+        (await tx.select().from(profiles).where(eq(profiles.id, verified.accountToken)))[0],
+        "PURCHASE_ACCOUNT_NOT_FOUND",
+      );
+      if (eventId) {
+        if ((await tx.select().from(webhookEvents).where(eq(webhookEvents.id, eventId))).length)
+          return { received: true };
+        await tx.insert(webhookEvents).values({ id: eventId, createdAt: startedAt });
+      }
+      const current = (
+        await tx
+          .select()
+          .from(storeSubscriptions)
+          .where(eq(storeSubscriptions.referenceHash, referenceHash))
+      )[0];
+      if (current && (current.profileId !== p.id || current.store !== verified.store))
+        throw new AppError(403, "PURCHASE_ALREADY_LINKED");
+      // Store-issued replacement edges are immutable once observed. Missing edges in a
+      // later response must not erase the evidence needed to recover through older purchases.
+      if (linkedHash && current?.linkedReferenceHash && linkedHash !== current.linkedReferenceHash)
+        throw new AppError(403, "PURCHASE_CHAIN_INVALID");
+      const predecessor = linkedHash ?? current?.linkedReferenceHash ?? null;
+      await this.checkLineage(
+        tx,
+        verified.store,
+        p.id,
+        referenceHash,
+        predecessor,
+        current?.ownerVerifiedAt !== null && current?.ownerVerifiedAt !== undefined,
+        requireRegisteredLineage,
+      );
+      // Out-of-order network responses cannot overwrite a newer verification.
+      if (current && current.verifiedAt > startedAt) {
+        // Keep newer store state, but retain proof of the authenticated owner's original binding.
+        if (ownerVerified && current.ownerVerifiedAt === null)
+          await tx
+            .update(storeSubscriptions)
+            .set({ ownerVerifiedAt: startedAt })
+            .where(eq(storeSubscriptions.id, current.id));
+        return { received: true };
+      }
+      const id = current?.id ?? crypto.randomUUID();
+      const values = {
+        id,
+        profileId: p.id,
+        store: verified.store,
+        referenceHash,
+        linkedReferenceHash: predecessor,
+        reference: await this.vault.seal(verified.reference, `subscription:${id}`),
+        productId: verified.productId,
+        plan: verified.plan,
+        status: verified.status,
+        validUntil: verified.validUntil,
+        verifiedAt: startedAt,
+        nextCheckAt: startedAt + 6 * 60 * 60_000,
+        ...(ownerVerified ? { ownerVerifiedAt: startedAt } : {}),
+      };
+      await tx
+        .insert(storeSubscriptions)
+        .values(values)
+        .onConflictDoUpdate({ target: storeSubscriptions.referenceHash, set: values });
+      if (linkedHash) {
+        const prior = (
           await tx
             .select()
             .from(storeSubscriptions)
-            .where(eq(storeSubscriptions.referenceHash, referenceHash))
+            .where(eq(storeSubscriptions.referenceHash, linkedHash))
         )[0];
-        if (current && (current.profileId !== p.id || current.store !== verified.store))
-          throw new AppError(403, "PURCHASE_ALREADY_LINKED");
-        // Store-issued replacement edges are immutable once observed. Missing edges in a
-        // later response must not erase the evidence needed to recover through older purchases.
-        if (
-          linkedHash &&
-          current?.linkedReferenceHash &&
-          linkedHash !== current.linkedReferenceHash
-        )
-          throw new AppError(403, "PURCHASE_CHAIN_INVALID");
-        const predecessor = linkedHash ?? current?.linkedReferenceHash ?? null;
-        await this.checkLineage(
-          tx,
-          verified.store,
-          p.id,
-          referenceHash,
-          predecessor,
-          current?.ownerVerifiedAt !== null && current?.ownerVerifiedAt !== undefined,
-          requireRegisteredLineage,
+        if (prior && prior.profileId !== p.id) throw new AppError(403, "PURCHASE_ALREADY_LINKED");
+        if (prior)
+          await tx
+            .update(storeSubscriptions)
+            .set({ status: "expired", validUntil: startedAt, verifiedAt: startedAt })
+            .where(eq(storeSubscriptions.id, prior.id));
+      }
+      const persisted = await tx
+        .select()
+        .from(storeSubscriptions)
+        .where(eq(storeSubscriptions.profileId, p.id));
+      const planned = persisted
+        .filter((s) => s.referenceHash !== referenceHash)
+        .map((s) =>
+          s.referenceHash === linkedHash
+            ? { ...s, status: "expired" as const, validUntil: startedAt, verifiedAt: startedAt }
+            : s,
         );
-        // Out-of-order network responses cannot overwrite a newer verification.
-        if (current && current.verifiedAt > startedAt) {
-          // Keep newer store state, but retain proof of the authenticated owner's original binding.
-          if (ownerVerified && current.ownerVerifiedAt === null)
-            await tx
-              .update(storeSubscriptions)
-              .set({ ownerVerifiedAt: startedAt })
-              .where(eq(storeSubscriptions.id, current.id));
-          return { received: true };
-        }
-        const id = current?.id ?? crypto.randomUUID();
-        const values = {
-          id,
-          profileId: p.id,
-          store: verified.store,
-          referenceHash,
-          linkedReferenceHash: predecessor,
-          reference: await this.vault.seal(verified.reference, `subscription:${id}`),
-          productId: verified.productId,
-          plan: verified.plan,
-          status: verified.status,
-          validUntil: verified.validUntil,
-          verifiedAt: startedAt,
-          nextCheckAt: startedAt + 6 * 60 * 60_000,
-          ...(ownerVerified ? { ownerVerifiedAt: startedAt } : {}),
-        };
-        await tx
-          .insert(storeSubscriptions)
-          .values(values)
-          .onConflictDoUpdate({ target: storeSubscriptions.referenceHash, set: values });
-        if (linkedHash) {
-          const prior = (
-            await tx
-              .select()
-              .from(storeSubscriptions)
-              .where(eq(storeSubscriptions.referenceHash, linkedHash))
-          )[0];
-          if (prior && prior.profileId !== p.id) throw new AppError(403, "PURCHASE_ALREADY_LINKED");
-          if (prior)
-            await tx
-              .update(storeSubscriptions)
-              .set({ status: "expired", validUntil: startedAt, verifiedAt: startedAt })
-              .where(eq(storeSubscriptions.id, prior.id));
-        }
-        return aggregate(tx, p.id, startedAt);
-      },
-      { behavior: "immediate" },
-    );
+      planned.push({
+        ...values,
+        ownerVerifiedAt: ownerVerified ? startedAt : (current?.ownerVerifiedAt ?? null),
+      });
+      return aggregate(tx, p.id, startedAt, planned);
+    });
   }
   private async checkLineage(
     tx: Tx,

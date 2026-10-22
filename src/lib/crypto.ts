@@ -1,4 +1,4 @@
-import type { Env } from "../env";
+import type { Env } from "../config";
 const encoder = new TextEncoder();
 const encode = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
 const decode = (value: string) => Uint8Array.from(atob(value), (c) => c.charCodeAt(0));

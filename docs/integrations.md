@@ -1,28 +1,29 @@
 # 配信・ストア連携
 
-本番メールは**Resend + React Email**、プッシュは**Expo Push Service**へ直接接続します。サブスクは**App Store / Google PlayのAPIでサーバー検証**します。SMSは次期フェーズ対応であり、初期フェーズでは登録・送信できません。
+本番メールは **Void (`void/email`) → Cloudflare Email Service + React Email**、プッシュは **Expo Push Service** です。サブスクはApp Store / Google PlayのAPIでサーバー検証します。SMSは次期対応です。
 
-ローカルは`NOTIFICATION_DRIVER=gateway`で`.local/mailbox`へ保存し、外部送信しません。本番は`NOTIFICATION_DRIVER=native`です。
+## Void / Cloudflare Email / React Email
 
-## Resend / React Email
+`src/emails/notice.ts` で日本語の本文をHTMLとプレーンテキストへ変換し、`sendEmail()` に渡します。宛先は常に一件で、伝言の件名・本文・他宛先は含めません。Outbox IDを `idempotencyKey` と `X-Outbox-ID` に渡し、返されたメッセージIDを `void:ID` として保存します。
 
-設定するSecrets:
+本番は `NOTIFICATION_DRIVER=native` と `EMAIL_FROM` を設定します。Cloudflareへ直接デプロイする構成なので、`void.config.ts` に実送信元の `email: { from: "表示名 <notice@mail.example.jp>" }` を設定し、同じ値を `EMAIL_FROM` の本番secretへ登録してください。
 
-- `RESEND_API_KEY`: 送信ドメインに必要な権限のAPIキー
-- `EMAIL_FROM`: Resendで認証したドメインの送信元（例`私に何かあったら <notice@example.jp>`）
-- `RESEND_WEBHOOK_SECRET`: Resendから発行された`whsec_...`
+```sh
+bunx void email setup --platform cloudflare
+bunx void email status --platform cloudflare
+```
 
-`src/emails/notice.ts`で日本語のReact EmailをHTMLとプレーンテキストに変換し、Resendの`POST /emails`へ送ります。通知ごとに一件の宛先を設定し、Outbox UUIDを`Idempotency-Key`と`outbox_id`タグに使います。本文・他の宛先は通知に含めません。表示名はReactでエスケープします。認証リンクが改変されないよう、Resend側のクリック追跡は無効にしてください。
+任意の利用者・受取人へ送るため、Workers PaidとEmail Sendingのオンボーディング、送信ドメインのSPF／DKIM／DMARCが必要です。確認済み宛先だけへ送る無料枠の設定では、本サービスの一般公開要件を満たしません。実ドメインの設定は未実施です。
 
-Webhook URLは`https://API_DOMAIN/webhooks/resend`です。`svix-id`、`svix-timestamp`、`svix-signature`を使い、生の本文に対する署名、±5分の時刻、一意のイベントIDを検証します。
+ローカルはVoid標準受信箱へキャプチャし、実送信しません。`void/email/testing` の公式ハーネスでも送信を検証しています。従来のgatewayは既存のサービス単体テスト用に維持しています。
 
-- `email.delivered`: 台帳をdeliveredにする
-- `email.bounced/failed/complained/suppressed`: 台帳をfailedにする
-- warningの不達・苦情: 監視・公開準備を保留し、未送信通知と閲覧権限を失効
+Cloudflare Email SendingのEvent Subscriptionを、Voidが作成する `email-events` Queueへ接続してください。対象イベントは `cf.email.sending.message.delivered` と `bounced`／`failed`／`rejected`／`complained` です。`queues/email-events.ts` がメッセージIDを照合し、イベントIDの重複排除と台帳更新をD1の同一バッチで行います。一時的な `deferred` は終端失敗にしません。警告メールの終端失敗では監視・公開を保留します。
 
-送信要求がタイムアウトしても、後から受け取ったResendの`outbox_id`タグで結果を照合できます。Resendが受け付けた時点をacceptedとし、受信者への到達や閲覧とは分けます。
+Queue consumerは実装済みですが、送信ドメインのEvent Subscription作成は本番設定時に必要です。イベントが送信受付のDB記録より先に来た場合は再試行します。10回の再試行を超えた未処理イベントと、IDを記録できなかった `uncertain` はCloudflare側の活動記録と照合します。イベントのQueueを他用途のproducerへ開放しないでください。
 
-[Resend Send Email](https://resend.com/docs/api-reference/emails/send-email) / [Webhook署名](https://resend.com/docs/webhooks/verify-webhooks-requests) / [React Email render](https://react.email/docs/utilities/render)
+Voidの成功はメール送信受付であり、到達・閲覧とは別です。Cloudflareのnative bindingではVoid Platform側の冪等性保証が適用されないため、Outboxで重複claimを防ぎ、不明な結果を自動再送しません。タイムアウトでメッセージIDを失った通知も手動照合が必要です。
+
+[Voidメール](https://void.cloud/guide/email/sending) / [Cloudflare配信イベント](https://developers.cloudflare.com/email-service/reference/event-subscriptions/) / [React Email](https://react.email/docs/utilities/render)
 
 ## Expo Notifications
 
@@ -162,13 +163,13 @@ SMS対応は次期フェーズで検討します。事業者選定、電話番�
 
 既存DBのSMSレコードは保持しますが、監視の有効化・SMS招待の承諾を拒否し、公開生成時も保留します。未送信のSMS Outboxは配信処理で取り消します。メールへ自動変換しないため、利用者は宛先をメールとして登録し直して承諾を得る必要があります。
 
-`NOTIFICATION_GATEWAY_URL`と`NOTIFICATION_GATEWAY_SECRET`はローカルのメール・プッシュ通知キャプチャ用です。初期フェーズの本番配信ではResend/Expoへ直接接続するため不要です。
+`NOTIFICATION_GATEWAY_URL`と`NOTIFICATION_GATEWAY_SECRET`はローカルのメール・プッシュ通知キャプチャ用です。通常のVoidローカル開発と本番配信では不要です。
 
-タイムアウト・非2xx・形式不正はuncertainです。受け付けた可能性があるため自動再送しません。台帳がsendingで2分経過した場合も同様です。事業者の受付記録を調べて結果を確定してください。未確定通知の再送APIはありません。
+外部送信のタイムアウト・結果不明はuncertainです。受け付けた可能性があるため自動再送しません。台帳がsendingで2分経過した場合も同様です。事業者の受付記録を調べて結果を確定してください。未確定通知の再送APIはありません。
 
 ## 正規化した配信結果・開発用権利イベント
 
-`POST /webhooks/events`はローカル検証など、信頼できるサーバーからの正規化済みイベント用です。本番のResend配信結果は専用Webhookを使います。
+`POST /webhooks/events`はローカル検証など、信頼できるサーバーからの正規化済みイベント用です。本番のメール配信結果はCloudflare Queues経由で受け取ります。
 
 - `X-Timestamp`: UTC Unixミリ秒、±5分
 - `X-Signature`: `HMAC-SHA256(WEBHOOK_SECRET, timestamp + "." + rawBody)`のBase64

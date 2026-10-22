@@ -1,3 +1,4 @@
+import { createEmailTestHarness } from "void/email/testing";
 import { afterEach, beforeEach, expect, test, spyOn } from "bun:test";
 import { eq } from "drizzle-orm";
 import { exportPKCS8, generateKeyPair } from "jose";
@@ -5,8 +6,7 @@ import { fixture, type Fixture } from "./helpers";
 import { renderNotice } from "../src/emails/notice";
 import {
   notificationTransport,
-  verifyResendWebhook,
-  processResendWebhook,
+  processEmailEvent,
   pollExpoReceipts,
   type HttpClient,
 } from "../src/integrations/notifications";
@@ -63,23 +63,19 @@ test("React Email escapes untrusted display names and renders both formats", asy
   expect(mail.text).toContain("死亡を確認したものではありません");
   expect(mail.html).toContain("https://example.jp/receive#token");
 });
-test("Resend sends one recipient, no confidential body, with stable idempotency", async () => {
+test("Void email sends React Email to one recipient with its Outbox key", async () => {
   const transport = notificationTransport(
-    {
-      ...f.env,
-      NOTIFICATION_DRIVER: "native",
-      RESEND_API_KEY: "test",
-      EMAIL_FROM: "App <app@example.jp>",
-    },
-    fakeHttp(async (url, init) => {
-      expect(url).toBe("https://api.resend.com/emails");
-      expect(new Headers(init?.headers).get("Idempotency-Key")).toBe("outbox-id");
-      const body = JSON.parse(String(init?.body));
-      expect(body.to).toEqual(["receiver@example.jp"]);
-      expect(body.tags).toEqual([{ name: "outbox_id", value: "outbox-id" }]);
-      expect(body.html).toContain("テスト");
-      return Response.json({ id: "resend-id" });
+    { ...f.env, NOTIFICATION_DRIVER: "native", EMAIL_FROM: "App <app@example.jp>" },
+    fakeHttp(async () => {
+      throw new Error("No HTTP email provider");
     }),
+    async (body) => {
+      expect(body.to).toBe("receiver@example.jp");
+      expect(body.idempotencyKey).toBe("outbox-id");
+      expect(body.headers).toEqual({ "X-Outbox-ID": "outbox-id" });
+      expect(body.html).toContain("テスト");
+      return { ok: true, ids: [{ recipient: "receiver@example.jp", messageId: "mail-id" }] };
+    },
   );
   expect(
     await transport("outbox-id", {
@@ -87,7 +83,17 @@ test("Resend sends one recipient, no confidential body, with stable idempotency"
       to: "receiver@example.jp",
       template: "self_test",
     }),
-  ).toEqual({ state: "accepted", providerId: "resend:resend-id" });
+  ).toEqual({ state: "accepted", providerId: "void:mail-id" });
+});
+test("Void outcome unknown never becomes a definitive failure", async () => {
+  const transport = notificationTransport(
+    { ...f.env, NOTIFICATION_DRIVER: "native", EMAIL_FROM: "app@example.jp" },
+    fetch,
+    async () => ({ ok: false, error: { code: "OUTCOME_UNKNOWN", message: "timeout" } }),
+  );
+  expect(
+    await transport("id", { channel: "email", to: "a@example.jp", template: "self_test" }),
+  ).toEqual({ state: "uncertain" });
 });
 test("Expo successful ticket is accepted, not a user check-in", async () => {
   const { owner } = await f.ready();
@@ -134,33 +140,7 @@ test("Expo invalid-device receipt unregisters only the matching device", async (
   );
   expect((await f.db.select().from(devices)).length).toBe(0);
 });
-async function svixHeaders(raw: string, secret: Uint8Array, now: number) {
-  const timestamp = String(Math.floor(now / 1000)),
-    id = "msg_event_1";
-  const key = await crypto.subtle.importKey(
-    "raw",
-    secret as Uint8Array<ArrayBuffer>,
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    new TextEncoder().encode(`${id}.${timestamp}.${raw}`),
-  );
-  return new Headers({
-    "svix-id": id,
-    "svix-timestamp": timestamp,
-    "svix-signature": `v1,${Buffer.from(signature).toString("base64")}`,
-  });
-}
-test("Resend validates raw-body signature and handles duplicate bounced events", async () => {
-  const secret = new Uint8Array(32).fill(91);
-  const env = {
-    ...f.env,
-    RESEND_WEBHOOK_SECRET: `whsec_${Buffer.from(secret).toString("base64")}`,
-  };
+test("Cloudflare email Queue events deduplicate permanent failures", async () => {
   const id = await enqueue(
     f.db,
     f.service.vault,
@@ -171,15 +151,14 @@ test("Resend validates raw-body signature and handles duplicate bounced events",
   );
   await f.db
     .update(outbox)
-    .set({ state: "accepted", providerId: "resend:abc" })
+    .set({ state: "accepted", providerId: "void:abc" })
     .where(eq(outbox.id, id));
-  const raw = JSON.stringify({ type: "email.bounced", data: { email_id: "abc" } });
-  const headers = await svixHeaders(raw, secret, f.now());
-  await expect(verifyResendWebhook(env, `${raw} `, headers, f.now())).rejects.toThrow(
-    "INVALID_SIGNATURE",
-  );
-  await processResendWebhook(f.db, env, raw, headers, f.now());
-  await processResendWebhook(f.db, env, raw, headers, f.now());
+  const event = {
+    type: "cf.email.sending.message.bounced",
+    payload: { eventId: "event-1", messageId: "abc" },
+  };
+  await processEmailEvent(f.db, event, f.now());
+  await processEmailEvent(f.db, event, f.now());
   expect((await f.db.select().from(outbox).where(eq(outbox.id, id)))[0]!.state).toBe("failed");
 });
 function googlePurchase(accountToken: string) {
@@ -521,5 +500,29 @@ test("Apple restore verifies the supplied proof, rejects family sharing, and ref
     );
   } finally {
     decoder.mockRestore();
+  }
+});
+
+test("Void official email harness captures the real sendEmail integration", async () => {
+  const inbox = createEmailTestHarness();
+  try {
+    const transport = notificationTransport({
+      ...f.env,
+      NOTIFICATION_DRIVER: "native",
+      EMAIL_FROM: "notice@example.jp",
+    });
+    const result = await transport("harness-id", {
+      channel: "email",
+      to: "receiver@example.jp",
+      template: "self_test",
+    });
+    expect(result.state).toBe("accepted");
+    expect(inbox.messages).toHaveLength(1);
+    expect(inbox.messages[0]!.text).toContain("テスト通知");
+    expect(
+      inbox.messages[0]!.headers["X-Outbox-ID"] ?? inbox.messages[0]!.headers["x-outbox-id"],
+    ).toBe("harness-id");
+  } finally {
+    inbox.dispose();
   }
 });

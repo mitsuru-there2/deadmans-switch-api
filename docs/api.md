@@ -131,7 +131,7 @@ ExpoのUniversal Links / App Linksを`TRUSTED_ORIGINS`へ設定します。任�
 
 `/internal/*`は`Authorization: Bearer OPERATIONS_SECRET`です。利用者のセッションでは呼べません。`/webhooks/events`の署名と契約は[接続仕様](integrations.md)を参照してください。
 
-`POST /webhooks/resend`はSvix署名、`POST /webhooks/apple`はApple署名JWS、`POST /webhooks/google`はGoogle OIDCを検証します。詳細な商品・鍵・通知設定は[配信・ストア連携](integrations.md)にあります。
+メールの配信結果はCloudflare Email SendingのEvent SubscriptionからVoid Queueへ入り、HTTPのResend webhookは廃止しました。`POST /webhooks/apple`はApple署名JWS、`POST /webhooks/google`はGoogle OIDCを検証します。詳細な商品・鍵・通知設定は[配信・ストア連携](integrations.md)にあります。
 
 ## アプリ向けの共有応答と同意本文
 
