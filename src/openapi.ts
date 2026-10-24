@@ -69,6 +69,38 @@ route(
 route("delete", "/v1/auth/device-sessions", "Revoke all device credentials", undefined, 204);
 route(
   "post",
+  "/v1/contact-email/change",
+  "Pause monitoring and verify both old and new contact emails",
+  c.emailChangeSchema,
+  202,
+  [{ bearerAuth: [] }],
+);
+route(
+  "get",
+  "/v1/contact-email/change",
+  "Get the initiating device's pending email change",
+  undefined,
+  200,
+  [{ bearerAuth: [] }],
+);
+route(
+  "delete",
+  "/v1/contact-email/change",
+  "Cancel email change without resuming monitoring",
+  undefined,
+  204,
+  [{ bearerAuth: [] }],
+);
+route(
+  "post",
+  "/v1/contact-email/change/confirm",
+  "Confirm old then new email with single-use proof and initiating device",
+  c.confirmContactSchema,
+  200,
+  [{ bearerAuth: [] }],
+);
+route(
+  "post",
   "/v1/auth/restore",
   "Restore a registered same-store purchase to this device; full purchase proof required",
   c.restorePurchaseSchema,
@@ -187,7 +219,7 @@ route(
 route(
   "get",
   "/v1/devices",
-  "List own push registrations (id and createdAt only); owner Bearer required",
+  "List own push registrations with name, platform, last API use and current device; owner Bearer required",
   undefined,
   200,
   [{ bearerAuth: [] }],
@@ -236,6 +268,15 @@ paths["/api/auth/magic-link/verify"] = {
   },
 };
 route("post", "/api/auth/sign-out", "End current session");
+route("get", "/api/auth/get-session", "Current email session");
+route("get", "/api/auth/list-sessions", "List email sessions");
+route(
+  "post",
+  "/api/auth/revoke-session",
+  "Revoke one email session",
+  z.object({ token: z.string() }),
+);
+route("post", "/api/auth/revoke-other-sessions", "Revoke other email sessions");
 export const openApiDocument = {
   openapi: "3.1.0",
   info: {

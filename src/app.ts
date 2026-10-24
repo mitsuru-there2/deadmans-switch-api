@@ -15,11 +15,12 @@ import {
   authCompleteScript,
 } from "./web/recipient";
 import { and, desc, eq, inArray } from "drizzle-orm";
-import { createAuth, type Auth } from "./auth";
+import { createAuth, validSession, type Auth } from "./auth";
 import { connectDb, type Database } from "./db/client";
 import {
   audit,
   devices,
+  deviceCredentials,
   entitlements,
   outbox,
   profiles,
@@ -30,6 +31,7 @@ import {
 } from "./db/schema";
 import { parseEnv, type Env } from "./config";
 import { secretEqual, verifySignature } from "./lib/crypto";
+import { EmailChangeService } from "./services/email-change";
 import { DeviceAuthService } from "./services/device-auth";
 import { RestoreOperations } from "./services/restore-operations";
 import { AppError, requireValue } from "./lib/errors";
@@ -59,6 +61,7 @@ import {
   bootstrapSchema,
   contactEmailSchema,
   confirmContactSchema,
+  emailChangeSchema,
   restorePurchaseSchema,
   restoreResultSchema,
 } from "./contracts";
@@ -72,6 +75,8 @@ type Variables = {
   config: Env;
   user: SessionUser;
   deviceToken: string | undefined;
+  credentialId: string | undefined;
+  recoverySessionId: string | undefined;
 };
 export interface AppDependencies {
   db?: Database;
@@ -83,6 +88,11 @@ export function createApp(deps: AppDependencies = {}) {
   const app = new Hono<{ Bindings: Env; Variables: Variables }>();
   const now = deps.now ?? Date.now;
   app.use("*", secureHeaders());
+  app.use("*", async (c, next) => {
+    c.header("Cache-Control", "no-store");
+    c.header("Referrer-Policy", "no-referrer");
+    await next();
+  });
   app.use(
     "*",
     bodyLimit({
@@ -226,6 +236,22 @@ export function createApp(deps: AppDependencies = {}) {
           }
         }
       }
+      const publicAuth = ["/api/auth/sign-in/magic-link", "/api/auth/magic-link/verify"];
+      if (
+        ![
+          ...publicAuth,
+          "/api/auth/get-session",
+          "/api/auth/sign-out",
+          "/api/auth/list-sessions",
+          "/api/auth/revoke-session",
+          "/api/auth/revoke-other-sessions",
+        ].includes(c.req.path)
+      )
+        throw new AppError(404, "NOT_FOUND");
+      if (!publicAuth.includes(c.req.path)) {
+        const session = await validSession(c.get("auth"), c.get("db"), c.req.raw.headers);
+        if (!session) throw new AppError(401, "AUTHENTICATION_REQUIRED");
+      }
       return c.get("auth").handler(c.req.raw);
     })
     // A completed restore revokes its source Bearer. This narrow endpoint requires that
@@ -265,12 +291,17 @@ export function createApp(deps: AppDependencies = {}) {
       }
       const token = c.req.header("Authorization")?.replace(/^Bearer /, "") ?? "";
       const isDevice = token.startsWith("dms_");
+      const recovery = isDevice
+        ? null
+        : await validSession(c.get("auth"), c.get("db"), authHeaders);
       const u = isDevice
         ? await new DeviceAuthService(c.get("db"), c.get("config"), now).authenticate(token)
-        : (await c.get("auth").api.getSession({ headers: authHeaders }))?.user;
+        : recovery?.user;
       if (!u || (!isDevice && !u.emailVerified)) throw new AppError(401, "AUTHENTICATION_REQUIRED");
       c.set("user", u);
       c.set("deviceToken", isDevice ? token : undefined);
+      c.set("credentialId", u && "credentialId" in u ? (u.credentialId as string) : undefined);
+      c.set("recoverySessionId", recovery?.session.id);
       await rateLimit(c.get("db"), u.id, "owner", 120, 60_000, now());
       const path = c.req.path,
         method = c.req.method;
@@ -282,6 +313,8 @@ export function createApp(deps: AppDependencies = {}) {
       // Purchase/restore, account recovery, and data-control actions remain reachable after expiry.
       const exempt =
         recipientRoute ||
+        path === "/v1/contact-email/change" ||
+        path === "/v1/contact-email/change/confirm" ||
         path.startsWith("/v1/billing/") ||
         path.startsWith("/v1/auth/") ||
         path === "/v1/me" ||
@@ -303,6 +336,7 @@ export function createApp(deps: AppDependencies = {}) {
         await new DeviceAuthService(c.get("db"), c.get("config"), now).renew(
           c.get("user").id,
           c.get("deviceToken"),
+          c.get("recoverySessionId"),
         ),
       ),
     )
@@ -339,6 +373,60 @@ export function createApp(deps: AppDependencies = {}) {
         );
         return c.json({ verified: true });
       },
+    )
+    .use("/v1/contact-email/change", async (c, next) => {
+      if (!c.get("credentialId")) throw new AppError(401, "DEVICE_AUTHENTICATION_REQUIRED");
+      await next();
+    })
+    .use("/v1/contact-email/change/*", async (c, next) => {
+      if (!c.get("credentialId")) throw new AppError(401, "DEVICE_AUTHENTICATION_REQUIRED");
+      await next();
+    })
+    .get("/v1/contact-email/change", async (c) =>
+      c.json(
+        await new EmailChangeService(c.get("db"), c.get("config"), now).status(
+          c.get("user").id,
+          c.get("credentialId")!,
+        ),
+      ),
+    )
+    .post(
+      "/v1/contact-email/change",
+      validator("json", (value: z.input<typeof emailChangeSchema>) =>
+        emailChangeSchema.parse(value),
+      ),
+      async (c) => {
+        await rateLimit(c.get("db"), c.get("user").id, "email-change", 3, DAY, now());
+        return c.json(
+          await new EmailChangeService(c.get("db"), c.get("config"), now).start(
+            c.get("user").id,
+            c.get("credentialId")!,
+            c.req.valid("json").email,
+          ),
+          202,
+        );
+      },
+    )
+    .delete("/v1/contact-email/change", async (c) => {
+      await new EmailChangeService(c.get("db"), c.get("config"), now).cancel(
+        c.get("user").id,
+        c.get("credentialId")!,
+      );
+      return c.body(null, 204);
+    })
+    .post(
+      "/v1/contact-email/change/confirm",
+      validator("json", (value: z.input<typeof confirmContactSchema>) =>
+        confirmContactSchema.parse(value),
+      ),
+      async (c) =>
+        c.json(
+          await new EmailChangeService(c.get("db"), c.get("config"), now).confirm(
+            c.get("user").id,
+            c.get("credentialId")!,
+            c.req.valid("json").token,
+          ),
+        ),
     )
     .post(
       "/v1/auth/restore",
@@ -561,21 +649,38 @@ export function createApp(deps: AppDependencies = {}) {
     )
     .get("/v1/devices", async (c) => {
       const p = await c.get("service").profile(c.get("user").id);
+      const rows = await c
+        .get("db")
+        .select({
+          id: devices.id,
+          createdAt: devices.createdAt,
+          name: devices.name,
+          platform: devices.platform,
+          credentialId: devices.credentialId,
+          lastSeenAt: deviceCredentials.lastSeenAt,
+        })
+        .from(devices)
+        .leftJoin(deviceCredentials, eq(deviceCredentials.id, devices.credentialId))
+        .where(eq(devices.profileId, p.id))
+        .orderBy(desc(devices.createdAt));
       return c.json({
-        devices: await c
-          .get("db")
-          .select({ id: devices.id, createdAt: devices.createdAt })
-          .from(devices)
-          .where(eq(devices.profileId, p.id))
-          .orderBy(desc(devices.createdAt)),
+        devices: rows.map(({ credentialId, ...row }) => ({
+          ...row,
+          isCurrent: !!credentialId && credentialId === c.get("credentialId"),
+        })),
       });
     })
     .post(
       "/v1/devices",
       validator("json", (value: z.input<typeof deviceSchema>) => deviceSchema.parse(value)),
       async (c) => {
-        const { token } = c.req.valid("json");
-        return c.json(await c.get("service").addDevice(c.get("user").id, token), 201);
+        const { token, ...metadata } = c.req.valid("json");
+        return c.json(
+          await c
+            .get("service")
+            .addDevice(c.get("user").id, token, c.get("credentialId"), metadata),
+          201,
+        );
       },
     )
     .delete("/v1/devices/:id", async (c) => {
@@ -608,7 +713,16 @@ export function createApp(deps: AppDependencies = {}) {
           expiresAt: now() + DAY,
         },
         now(),
-        { profileId: p.id },
+        {
+          profileId: p.id,
+          contactGeneration: (
+            await c
+              .get("db")
+              .select()
+              .from(user)
+              .where(eq(user.id, c.get("user").id))
+          )[0]!.authGeneration,
+        },
       );
       return c.json({ queued: true, deliveryId }, 202);
     })

@@ -5,6 +5,8 @@ export const user = sqliteTable("user", {
   name: text().notNull(),
   email: text().notNull().unique(),
   emailVerified: integer("email_verified", { mode: "boolean" }).notNull().default(false),
+  authGeneration: integer("auth_generation").notNull().default(0),
+  selfTestRequiredAfter: integer("self_test_required_after"),
   image: text(),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
@@ -20,6 +22,7 @@ export const deviceCredentials = sqliteTable(
     tokenHash: text("token_hash").notNull().unique(),
     expiresAt: integer("expires_at").notNull(),
     createdAt: integer("created_at").notNull(),
+    lastSeenAt: integer("last_seen_at"),
   },
   (t) => [index("device_credentials_user_idx").on(t.userId)],
 );
@@ -66,6 +69,7 @@ export const session = sqliteTable(
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
     ipAddress: text("ip_address"),
     userAgent: text("user_agent"),
+    authGeneration: integer("auth_generation").notNull().default(0),
   },
   (t) => [index("session_user_idx").on(t.userId)],
 );
@@ -174,6 +178,37 @@ export const devices = sqliteTable("devices", {
   token: text().notNull(),
   tokenHash: text("token_hash").notNull().unique(),
   createdAt: integer("created_at").notNull(),
+  name: text(),
+  platform: text({ enum: ["ios", "android"] }),
+  credentialId: text("credential_id")
+    .unique()
+    .references(() => deviceCredentials.id, { onDelete: "set null" }),
+});
+
+export const emailChanges = sqliteTable("email_changes", {
+  userId: text("user_id")
+    .primaryKey()
+    .references(() => user.id, { onDelete: "cascade" }),
+  id: text().notNull().unique(),
+  credentialId: text("credential_id")
+    .notNull()
+    .references(() => deviceCredentials.id, { onDelete: "cascade" }),
+  email: text().notNull(),
+  oldEmail: text("old_email").notNull(),
+  generation: integer().notNull(),
+  step: text({ enum: ["verify_old", "verify_new"] }).notNull(),
+  tokenHash: text("token_hash").notNull().unique(),
+  expiresAt: integer("expires_at").notNull(),
+});
+
+// Bind mail proofs to the account generation at issuance, before any authentication work.
+export const authLinkBindings = sqliteTable("auth_link_bindings", {
+  tokenHash: text("token_hash").primaryKey(),
+  userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
+  email: text().notNull(),
+  generation: integer().notNull(),
+  createdAt: integer("created_at").notNull(),
+  expiresAt: integer("expires_at").notNull(),
 });
 export const entitlements = sqliteTable("entitlements", {
   profileId: text("profile_id")
@@ -256,6 +291,7 @@ export const outbox = sqliteTable(
     recipientId: text("recipient_id").references(() => recipients.id, { onDelete: "cascade" }),
     deviceId: text("device_id").references(() => devices.id, { onDelete: "set null" }),
     version: integer(),
+    contactGeneration: integer("contact_generation"),
     kind: text({
       enum: ["auth", "invitation", "reminder", "warning", "final", "self_test"],
     }).notNull(),

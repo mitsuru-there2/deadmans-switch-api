@@ -9,6 +9,7 @@ export const entitlementStatusSchema = z.enum(["active", "grace", "expired", "re
 export const planSchema = z.enum(["basic", "plus"]);
 export const activationBlockerSchema = z.enum([
   "PAUSE_BEFORE_EDITING",
+  "EMAIL_CHANGE_PENDING",
   "VERIFIED_EMAIL_REQUIRED",
   "ACTIVE_ENTITLEMENT_REQUIRED",
   "MONITORING_UNHEALTHY",
@@ -180,9 +181,25 @@ export const exportResponseSchema = z
   })
   .strict();
 export const devicesResponseSchema = z
-  .object({ devices: z.array(z.object({ id, createdAt: time }).strict()) })
+  .object({
+    devices: z.array(
+      z
+        .object({
+          id,
+          createdAt: time,
+          name: z.string().nullable(),
+          platform: z.enum(["ios", "android"]).nullable(),
+          lastSeenAt: nullableTime,
+          isCurrent: z.boolean(),
+        })
+        .strict(),
+    ),
+  })
   .strict();
 export type DevicesResponse = z.infer<typeof devicesResponseSchema>;
+export const emailChangePendingSchema = z
+  .object({ id, email: z.string(), step: z.enum(["verify_old", "verify_new"]), expiresAt: time })
+  .strict();
 const queued = z.object({ queued: z.literal(true) }).strict();
 const version = z.object({ version: z.number().int() }).strict();
 export const successResponses: Record<string, z.ZodType> = {
@@ -191,6 +208,16 @@ export const successResponses: Record<string, z.ZodType> = {
   "post /v1/auth/restore/result": restoreResultResponseSchema,
   "post /v1/auth/device-session": deviceSessionSchema,
   "post /v1/contact-email": queued,
+  "post /v1/contact-email/change": z
+    .object({ changeId: id, step: z.literal("verify_old"), expiresAt: time })
+    .strict(),
+  "get /v1/contact-email/change": z
+    .object({ change: emailChangePendingSchema.nullable() })
+    .strict(),
+  "post /v1/contact-email/change/confirm": z.union([
+    z.object({ step: z.literal("verify_new"), expiresAt: time }).strict(),
+    z.object({ verified: z.literal(true) }).strict(),
+  ]),
   "post /v1/contact-email/confirm": z.object({ verified: z.literal(true) }).strict(),
   "get /v1/me": meResponseSchema,
   "get /v1/switch": switchStatusSchema,

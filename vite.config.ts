@@ -1,6 +1,17 @@
 import { defineConfig } from "vite";
 import { voidPlugin } from "void";
-export default defineConfig({
+export default defineConfig(({ command, mode }) => ({
+  resolve: {
+    alias: {
+      "dms-runtime-app": new URL(
+        command === "serve" && mode === "e2e"
+          ? "./tests/e2e/runtime-app.ts"
+          : "./src/runtime-app.ts",
+        import.meta.url,
+      ).pathname,
+    },
+  },
+  cacheDir: process.env.DMS_TEST_CACHE_DIR,
   assetsInclude: ["**/*.cer"],
   plugins: [voidPlugin({ persistTo: process.env.DMS_TEST_STATE_DIR })],
   optimizeDeps: {
@@ -26,4 +37,4 @@ export default defineConfig({
     ],
   },
   server: { host: "127.0.0.1", port: 8787, strictPort: true },
-});
+}));

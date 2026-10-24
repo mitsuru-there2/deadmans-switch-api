@@ -12,7 +12,10 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "noUncheckedIndexedAccess": true,
-    "allowImportingTsExtensions": true
+    "allowImportingTsExtensions": true,
+    "paths": {
+      "dms-runtime-app": ["./src/runtime-app.ts"]
+    }
   },
   "include": [
     "src",

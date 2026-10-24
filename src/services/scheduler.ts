@@ -18,6 +18,8 @@ import {
   session,
   deviceCredentials,
   contactVerifications,
+  emailChanges,
+  authLinkBindings,
 } from "../db/schema";
 import type { Env } from "../config";
 import { hash, randomToken, Vault } from "../lib/crypto";
@@ -237,6 +239,8 @@ export async function tick(db: Database, env: Env, now = Date.now()) {
   await db.delete(session).where(lt(session.expiresAt, new Date(now)));
   await db.delete(deviceCredentials).where(lt(deviceCredentials.expiresAt, now));
   await db.delete(contactVerifications).where(lt(contactVerifications.expiresAt, now));
+  await db.delete(emailChanges).where(lt(emailChanges.expiresAt, now));
+  await db.delete(authLinkBindings).where(lt(authLinkBindings.expiresAt, now));
   await purgeRestoreResults(db, now);
   // Erase expired snapshots; do not keep readable content beyond the viewing period.
   await db

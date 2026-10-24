@@ -18,7 +18,7 @@
 
 端末トークンは180日有効です。有効期限内に`device-session`を自動実行して新しいトークンを保存してください。更新は直列に行い、並行したAPIリクエストは保存後のトークンを使います。旧トークンは直ちに失効します。更新応答を失った場合や端末の認証情報が失われた場合は、同じストアの購入を復元します。トークンはURL・ログ・通常のAsyncStorageへ保存しません。トークン更新・購入検証・バックグラウンド通信は本人確認の記録には数えません。
 
-連絡先確認URLは`RECIPIENT_WEB_URL/confirm-contact#TOKEN`です。登録を始めたアプリでフラグメントを読み、端末認証付きで確認APIへ渡します。10分・単回利用で、再発行時は旧リンクが失効します。メール確認では他アカウントへの統合はしません。既存アカウントに結び付いたメールは`EMAIL_ALREADY_LINKED_USE_RECOVERY`となり、そのメールで元のアカウントへ復旧します。確認済みメールの変更はこのAPIでは提供しません。
+連絡先確認URLは`RECIPIENT_WEB_URL/confirm-contact#TOKEN`です。登録を始めたアプリでフラグメントを読み、端末認証付きで確認APIへ渡します。10分・単回利用で、再発行時は旧リンクが失効します。メール確認では他アカウントへの統合はしません。既存アカウントに結び付いたメールは`EMAIL_ALREADY_LINKED_USE_RECOVERY`となり、そのメールで元のアカウントへ復旧します。確認済みメールの変更には後述の専用APIを利用します。
 
 **同じストア内の機種変更・再インストール**では、新端末でbootstrapを実行し、そのBearerトークンで`POST /v1/auth/restore`を呼びます。Appleは`{store:"apple",signedTransaction:"STOREKIT_TRANSACTION_JWS"}`、Googleは`{store:"google",purchaseToken:"GOOGLE_PURCHASE_TOKEN"}`です。元のアカウントに認証付きで登録済みの購入と、ストアで確認した現在の有効な契約を照合します。復元先IDは入力で受け取りません。AppleのtransactionIdだけの要求は400、未登録の契約・契約失効は403です。端末IDごと5回/分、IPごと10回/分に制限します。
 
@@ -40,6 +40,29 @@ ExpoのUniversal Links / App Linksを`TRUSTED_ORIGINS`へ設定します。任�
 
 所有者のリクエストは120回/分。招待は10回/日/本人、同一宛先には1日1回、自分宛テストは3回/日です。登録可能宛先を無制限に作り直して外部通知を送ることを抑制します。制限はDBへ保存するためWorkerの再起動でリセットされません。入出力に本文・トークンを記録するHTTPロガーは使っていません。
 
+## 確認済みメール変更（2026-10-24追加）
+
+開始端末の有効なdevice Bearerが必須です。契約失効後も利用できます。旧メールが利用できない場合の変更・アカウント統合・ストア横断移行は提供しません。
+
+| Method / Path                         | 入力・成功応答                                                                                        |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| POST /v1/contact-email/change         | `{email,confirmed:true}` → 202 `{changeId,step:"verify_old",expiresAt}`                               |
+| GET /v1/contact-email/change          | `{change:null}` または `{change:{id,email,step,expiresAt}}`。開始端末分のみ                           |
+| POST /v1/contact-email/change/confirm | `{token}`。旧メール確認後は200 `{step:"verify_new",expiresAt}`、新メール確認後は200 `{verified:true}` |
+| DELETE /v1/contact-email/change       | 204。取消後も監視は停止したまま                                                                       |
+
+開始時に監視をpausedにし、公開リンクと未送信の警告・プッシュ・最終通知を失効させます。確認中は`EMAIL_CHANGE_PENDING`で有効化を拒否します。旧メールの所有確認を直近の本人再認証とし、それに成功してから新メールへ確認リンクを送ります。リンクは`RECIPIENT_WEB_URL/confirm-contact-change#TOKEN`。開始端末がフラグメントを読み、JSONでconfirmへ送ります。GETだけでは確認しません。期限は開始から10分で延長せず、各リンクは単回利用です。開始要求は3回/日で、進行中・不正要求もカウントします。
+
+変更完了はメール更新・認証世代更新・全Better Authセッションと他端末資格情報/プッシュ登録の失効をD1の同一バッチで確定します。旧メールで発行済みの復旧リンクや、変更と競合して作成された旧世代セッションは元アカウントを復旧できません。開始端末のBearerは維持します。旧・新メールへ完了通知を送り、新メールでself-testがaccepted/deliveredになるまで`SELF_TEST_REQUIRED`を返します。完了・取消・期限切れでも監視は自動再開しません。
+
+主なエラー: 400 `INVALID_EMAIL_CHANGE_LINK`、401 `DEVICE_AUTHENTICATION_REQUIRED`、403 `VERIFIED_EMAIL_REQUIRED`/`EMAIL_CHANGE_DEVICE_REQUIRED`、409 `EMAIL_CHANGE_IN_PROGRESS`/`EMAIL_UNCHANGED`/`EMAIL_ALREADY_LINKED_USE_RECOVERY`/`EMAIL_CHANGE_INVALIDATED`、429 `RATE_LIMITED`。タイムアウト後はGETとmeを照合し、開始・確認を無条件再送しません。
+
+## 登録端末の追加情報（2026-10-24）
+
+`POST /v1/devices`は従来の`token`に、任意の`name`（trim後1〜100文字）と`platform:"ios"|"android"`を受け付けます。省略したメタデータは既存値を保持します。現在端末のプッシュトークン更新でもIDを維持し、旧トークン向け未送信通知を取り消します。
+
+`GET /v1/devices`は`{devices:[{id,createdAt,name,platform,lastSeenAt,isCurrent}]}`を登録日時降順で返します。lastSeenAtは対応する端末資格情報で最後に認証が成功したサーバー時刻（Unix ms）です。現在端末はBearer文字列ではなく内部資格情報IDで判定するため、Bearer更新後も一致します。旧登録の不明項目はnull、紐付けのない登録はisCurrent:falseです。トークン・内部資格情報IDは公開しません。端末一覧はCookieだけでは利用できません。
+
 ## 本人用
 
 | Method / Path                       | 入力・動作                                                                                |
@@ -57,6 +80,7 @@ ExpoのUniversal Links / App Linksを`TRUSTED_ORIGINS`へ設定します。任�
 | `GET /v1/messages`                  | `{messages:[{id,recipientId,title,body,revision,updatedAt}]}`                             |
 | `PUT /v1/recipients/:id/message`    | `version,title,body`。1宛先1本文。新規も更新も同じ経路                                    |
 | `DELETE /v1/recipients/:id/message` | `version`                                                                                 |
+| `GET /v1/devices`                   | 本人の端末ID・登録日時・端末名・OS・最終API利用時刻・現在端末判定                         |
 | `POST /v1/devices`                  | `token:ExpoPushToken[...]`。最大5端末。既存は同じID                                       |
 | `DELETE /v1/devices/:id`            | 本人端末だけ削除。未送信プッシュも無効になる                                              |
 | `POST /v1/self-test`                | 本人の確認済みメールだけへ固定テスト通知。202                                             |
@@ -102,7 +126,7 @@ ExpoのUniversal Links / App Linksを`TRUSTED_ORIGINS`へ設定します。任�
 | `POST /v1/recipient-consents/:id/withdraw` | `action:"decline"/"report"`。承諾後、最終通知前でも辞退できる                                         |
 | `POST /v1/received`                        | `token,action:"preview"/"read"/"decline"/"report"`。readには`deathConfirmed:true,noticeVersion`が必須 |
 
-受取承諾は招待先メールの認証で行います。SMS・電話番号の受付は次期フェーズ対応です。
+受取承諾は招待先メールの認証で行います。SMS・電話番号の受付は対応対象外です。
 
 開封前は`{token,action:"preview"}`で`{senderName,notice,noticeVersion,expiresAt}`のみ取得します。件名・本文・抜粋は含まれず、同意も記録されません。注意文を表示し、受取人が別手段で死亡を確認したと明示操作したときだけ`{token,action:"read",deathConfirmed:true,noticeVersion:"2026-10-14-v1"}`を送ります。事前の受取承諾とこの開封同意は別です。
 

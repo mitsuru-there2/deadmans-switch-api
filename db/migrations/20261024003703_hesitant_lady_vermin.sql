@@ -1,0 +1,1 @@
+ALTER TABLE `outbox` ADD `contact_generation` integer;

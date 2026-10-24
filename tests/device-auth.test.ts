@@ -4,6 +4,7 @@ import { fixture, type Fixture } from "./helpers";
 import type { VerifiedSubscription } from "../src/integrations/stores";
 import {
   deviceCredentials,
+  devices,
   contactVerifications,
   entitlements,
   outbox,
@@ -449,7 +450,14 @@ test("device list contains only owned registration IDs and timestamps, with the 
   for (let i = 0; i < 5; i++) {
     f.advance(1);
     const device = await f.service.addDevice(owner.userId, `ExpoPushToken[owner-${i}]`);
-    expected.unshift({ id: device.id, createdAt: f.now() });
+    expected.unshift({
+      id: device.id,
+      createdAt: f.now(),
+      name: null,
+      platform: null,
+      lastSeenAt: null,
+      isCurrent: false,
+    });
   }
   await expect(f.service.addDevice(owner.userId, "ExpoPushToken[sixth]")).rejects.toThrow(
     "DEVICE_LIMIT",
@@ -485,4 +493,15 @@ test("native device list rejects cookie-only and malformed bearer fallback", asy
     ).toBe(401);
   }
   expect((await f.request("/v1/devices", "GET", undefined, owner.token)).status).toBe(200);
+});
+
+test("native push registration keeps its credential's ID when consolidating a legacy token", async () => {
+  const owner = await bootstrap();
+  const identity = new DeviceAuthService(f.db, f.env, f.now);
+  const credentialId = (await identity.authenticate(owner.token))!.credentialId;
+  const current = await f.service.addDevice(owner.userId, "ExpoPushToken[current]", credentialId);
+  await f.service.addDevice(owner.userId, "ExpoPushToken[legacy]");
+  const updated = await f.service.addDevice(owner.userId, "ExpoPushToken[legacy]", credentialId);
+  expect(updated.id).toBe(current.id);
+  expect(await f.db.select().from(devices)).toHaveLength(1);
 });

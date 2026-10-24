@@ -10,6 +10,9 @@ import {
   systemHealth,
   releases,
   devices,
+  emailChanges,
+  authLinkBindings,
+  user,
 } from "../db/schema";
 import type { Env } from "../config";
 import { hash, Vault } from "../lib/crypto";
@@ -18,6 +21,9 @@ export interface Notice {
   channel: "email" | "sms" | "push";
   to: string;
   template:
+    | "email_change_old"
+    | "email_change_new"
+    | "email_change_complete"
     | "magic_link"
     | "contact_verification"
     | "invitation"
@@ -32,6 +38,7 @@ export interface Notice {
   senderName?: string;
 }
 export interface NoticeContext {
+  contactGeneration?: number;
   profileId?: string;
   recipientId?: string;
   deviceId?: string;
@@ -136,6 +143,37 @@ export async function dispatch(
         return null;
       }
       let valid = !notice.expiresAt || notice.expiresAt > now;
+      if (notice.template === "email_change_old" || notice.template === "email_change_new") {
+        const pending = row.profileId
+          ? (
+              await tx
+                .select({ change: emailChanges })
+                .from(emailChanges)
+                .innerJoin(profiles, eq(profiles.userId, emailChanges.userId))
+                .where(eq(profiles.id, row.profileId))
+            )[0]?.change
+          : undefined;
+        valid &&=
+          !!pending &&
+          pending.expiresAt > now &&
+          pending.tokenHash === (await hash(notice.url?.split("#")[1] ?? ""));
+      }
+      if (notice.template === "magic_link") {
+        const token = new URL(notice.url!).searchParams.get("token") ?? "";
+        const proof = (
+          await tx
+            .select()
+            .from(authLinkBindings)
+            .where(eq(authLinkBindings.tokenHash, await hash(token)))
+        )[0];
+        const owner = (await tx.select().from(user).where(eq(user.email, notice.to)))[0];
+        valid &&=
+          !!proof &&
+          proof.expiresAt > now &&
+          (!owner ||
+            (owner.authGeneration === proof.generation &&
+              (!proof.userId || proof.userId === owner.id)));
+      }
       if (row.profileId && row.version !== null) {
         const p = (await tx.select().from(profiles).where(eq(profiles.id, row.profileId)))[0];
         valid &&= !!p && p.version === row.version;

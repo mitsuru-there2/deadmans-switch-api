@@ -71,6 +71,20 @@
       "when": 1792710202830,
       "tag": "20261022230322_tearful_whiplash",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1792802154200,
+      "tag": "20261024003554_flippant_sharon_ventura",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1792802223618,
+      "tag": "20261024003703_hesitant_lady_vermin",
+      "breakpoints": true
     }
   ]
 }

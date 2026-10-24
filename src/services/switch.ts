@@ -6,6 +6,8 @@ import {
   openingConsents,
   deliveries,
   devices,
+  emailChanges,
+  deviceCredentials,
   entitlements,
   messages,
   outbox,
@@ -468,6 +470,15 @@ export class SwitchService {
     if (!["draft", "paused", "held"].includes(p.state))
       blockers.push({ status: 409, code: "PAUSE_BEFORE_EDITING" });
     const u = requireValue((await tx.select().from(user).where(eq(user.id, p.userId)))[0]);
+    if (
+      (
+        await tx
+          .select()
+          .from(emailChanges)
+          .where(and(eq(emailChanges.userId, p.userId), sql`${emailChanges.expiresAt} > ${now}`))
+      ).length
+    )
+      blockers.push({ status: 422, code: "EMAIL_CHANGE_PENDING" });
     if (!u.emailVerified) blockers.push({ status: 422, code: "VERIFIED_EMAIL_REQUIRED" });
     const e = (await tx.select().from(entitlements).where(eq(entitlements.profileId, p.id)))[0];
     if (!isEntitled(e, now)) blockers.push({ status: 422, code: "ACTIVE_ENTITLEMENT_REQUIRED" });
@@ -493,6 +504,9 @@ export class SwitchService {
             and(
               eq(outbox.profileId, p.id),
               eq(outbox.kind, "self_test"),
+              ...(u.selfTestRequiredAfter === null
+                ? []
+                : [eq(outbox.contactGeneration, u.authGeneration)]),
               inArray(outbox.state, ["accepted", "delivered"]),
             ),
           )
@@ -705,14 +719,56 @@ export class SwitchService {
       return { message, expiresAt: d.expiresAt };
     });
   }
-  async addDevice(userId: string, token: string) {
+  async addDevice(
+    userId: string,
+    token: string,
+    credentialId?: string,
+    metadata: { name?: string; platform?: "ios" | "android" } = {},
+  ) {
     const p = await this.profile(userId),
-      tokenHash = await hash(token),
-      id = crypto.randomUUID();
+      tokenHash = await hash(token);
     return atomic(this.db, async (tx) => {
-      const existing = (await tx.select().from(devices).where(eq(devices.tokenHash, tokenHash)))[0];
+      if (
+        credentialId &&
+        !(
+          await tx
+            .select()
+            .from(deviceCredentials)
+            .where(
+              and(
+                eq(deviceCredentials.id, credentialId),
+                eq(deviceCredentials.userId, userId),
+                sql`${deviceCredentials.expiresAt} > ${this.now()}`,
+              ),
+            )
+        ).length
+      )
+        throw new AppError(401, "AUTHENTICATION_REQUIRED");
+      const byToken = (await tx.select().from(devices).where(eq(devices.tokenHash, tokenHash)))[0];
+      if (byToken && byToken.profileId !== p.id)
+        throw new AppError(409, "DEVICE_ALREADY_REGISTERED");
+      const byCredential = credentialId
+        ? (await tx.select().from(devices).where(eq(devices.credentialId, credentialId)))[0]
+        : undefined;
+      const existing = byCredential ?? byToken;
+      if (byToken && byCredential && byToken.id !== byCredential.id) {
+        await tx.delete(devices).where(eq(devices.id, byToken.id));
+      }
       if (existing) {
-        if (existing.profileId !== p.id) throw new AppError(409, "DEVICE_ALREADY_REGISTERED");
+        if (existing.tokenHash !== tokenHash)
+          await tx
+            .update(outbox)
+            .set({ state: "cancelled", payload: "" })
+            .where(and(eq(outbox.deviceId, existing.id), eq(outbox.state, "pending")));
+        await tx
+          .update(devices)
+          .set({
+            ...metadata,
+            ...(credentialId ? { credentialId } : {}),
+            tokenHash,
+            token: await this.vault.seal(token, `device:${existing.id}`),
+          })
+          .where(eq(devices.id, existing.id));
         return { id: existing.id };
       }
       if (
@@ -720,9 +776,12 @@ export class SwitchService {
           .length >= 5
       )
         throw new AppError(422, "DEVICE_LIMIT");
+      const id = crypto.randomUUID();
       await tx.insert(devices).values({
         id,
         profileId: p.id,
+        ...metadata,
+        credentialId,
         tokenHash,
         token: await this.vault.seal(token, `device:${id}`),
         createdAt: this.now(),
