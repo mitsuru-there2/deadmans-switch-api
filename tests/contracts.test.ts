@@ -1,3 +1,4 @@
+import { DeviceAuthService } from "../src/services/device-auth";
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { createApiClient } from "../src/client";
 import { CURRENT_CONSENT } from "../src/consents";
@@ -48,9 +49,10 @@ test("unpaid identity can get versioned consent and diagnostic status without ga
 
 test("actual paid success responses agree with OpenAPI schemas and Hono Client typing", async () => {
   const { owner } = await f.ready();
+  const native = await new DeviceAuthService(f.db, f.env, f.now).renew(owner.id);
   for (const [path, schema] of Object.entries(successResponses)) {
     if (!path.startsWith("get /v1/") || path.includes("{")) continue;
-    const response = await f.request(path.slice(4), "GET", undefined, owner.token);
+    const response = await f.request(path.slice(4), "GET", undefined, native.token);
     expect(response.status).toBe(200);
     expect(schema.safeParse(await response.json()).success).toBe(true);
   }

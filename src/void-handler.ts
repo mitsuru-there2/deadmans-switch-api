@@ -1,5 +1,5 @@
 import { defineHandler } from "void/handler";
-import { app } from "./app";
+import { app } from "dms-runtime-app";
 import { runtimeEnv } from "./runtime";
 
 // The published Hono Client and security/authentication middleware remain the HTTP contract.

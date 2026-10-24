@@ -12,6 +12,9 @@ export const contactEmailSchema = z
   })
   .strict();
 export const confirmContactSchema = z.object({ token: tokenSchema }).strict();
+export const emailChangeSchema = contactEmailSchema
+  .pick({ email: true })
+  .extend({ confirmed: z.literal(true) });
 export const contactSchema = z
   .object({
     version: z.number().int().positive(),
@@ -60,6 +63,8 @@ export const receivedSchema = z.discriminatedUnion("action", [
 ]);
 export const deviceSchema = z
   .object({
+    name: z.string().trim().min(1).max(100).optional(),
+    platform: z.enum(["ios", "android"]).optional(),
     token: z
       .string()
       .regex(/^(ExponentPushToken|ExpoPushToken)\[[A-Za-z0-9_-]+\]$/)

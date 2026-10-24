@@ -14,6 +14,21 @@ import { render, toPlainText } from "@react-email/render";
 import type { Notice } from "../services/notifications";
 
 const copy: Record<Notice["template"], { subject: string; text: string; button: string }> = {
+  email_change_old: {
+    subject: "メール変更の本人確認",
+    text: "連絡先メールの変更を開始しました。監視は停止しました。開始したアプリで旧メールの所有を確認してください。開始から10分間有効です。",
+    button: "旧メールを確認する",
+  },
+  email_change_new: {
+    subject: "新しい連絡先メールの確認",
+    text: "開始したアプリで新メールの所有を確認してください。変更後の監視再開には新メール宛のテストと明示的な有効化が必要です。",
+    button: "新メールを確認する",
+  },
+  email_change_complete: {
+    subject: "連絡先メールを変更しました",
+    text: "旧メールと新メールの確認が完了し、連絡先メールを変更しました。監視は停止したままです。心当たりがない場合はアプリで監視状態と端末を確認してください。",
+    button: "確認する",
+  },
   contact_verification: {
     subject: "連絡先メールの確認 — 私に何かあったら",
     text: "このメールを警告の送信先・データの復旧先として登録します。登録を始めたアプリでリンクを開いて確認してください。有効期限は10分です。心当たりがなければ破棄してください。",

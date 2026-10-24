@@ -26,7 +26,8 @@
     "local": "bun scripts/local-control.ts",
     "test:runtime": "bun scripts/runtime-test.ts",
     "db:migrate:production": "void db migrate --remote",
-    "prepare": "void prepare"
+    "prepare": "void prepare",
+    "test:e2e": "bun scripts/e2e.ts"
   },
   "dependencies": {
     "@apple/app-store-server-library": "^3.1.0",

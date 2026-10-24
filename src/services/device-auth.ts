@@ -62,7 +62,7 @@ export class DeviceAuthService {
     if (!/^dms_[A-Za-z0-9_-]{43}$/.test(token)) return null;
     const row = (
       await this.db
-        .select({ user })
+        .select({ user, credentialId: deviceCredentials.id })
         .from(deviceCredentials)
         .innerJoin(user, eq(user.id, deviceCredentials.userId))
         .where(
@@ -72,9 +72,21 @@ export class DeviceAuthService {
           ),
         )
     )[0];
-    return row?.user ?? null;
+    if (!row) return null;
+    const touched = await this.db
+      .update(deviceCredentials)
+      .set({ lastSeenAt: this.now() })
+      .where(
+        and(
+          eq(deviceCredentials.id, row.credentialId),
+          eq(deviceCredentials.tokenHash, await hash(token)),
+          gt(deviceCredentials.expiresAt, this.now()),
+        ),
+      )
+      .returning({ id: deviceCredentials.id });
+    return touched.length ? { ...row.user, credentialId: row.credentialId } : null;
   }
-  async renew(userId: string, currentToken?: string) {
+  async renew(userId: string, currentToken?: string, recoverySessionId?: string) {
     if (currentToken) {
       const token = `dms_${randomToken()}`,
         expiresAt = this.now() + TOKEN_LIFETIME;
@@ -93,6 +105,22 @@ export class DeviceAuthService {
       return { token, expiresAt };
     }
     return atomic(this.db, async (tx) => {
+      if (recoverySessionId) {
+        const owner = (await tx.select().from(user).where(eq(user.id, userId)))[0];
+        const proof = (
+          await tx
+            .select()
+            .from(session)
+            .where(and(eq(session.id, recoverySessionId), eq(session.userId, userId)))
+        )[0];
+        if (
+          !owner ||
+          !proof ||
+          proof.authGeneration !== owner.authGeneration ||
+          proof.expiresAt.getTime() <= this.now()
+        )
+          throw new AppError(401, "AUTHENTICATION_REQUIRED");
+      }
       // Email recovery revokes lost-device credentials before establishing a new device.
       await tx.delete(deviceCredentials).where(eq(deviceCredentials.userId, userId));
       return this.issue(tx, userId);

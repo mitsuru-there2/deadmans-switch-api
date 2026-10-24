@@ -1,6 +1,6 @@
 # 配信・ストア連携
 
-本番メールは **Void (`void/email`) → Cloudflare Email Service + React Email**、プッシュは **Expo Push Service** です。サブスクはApp Store / Google PlayのAPIでサーバー検証します。SMSは次期対応です。
+本番メールは **Void (`void/email`) → Cloudflare Email Service + React Email**、プッシュは **Expo Push Service** です。サブスクはApp Store / Google PlayのAPIでサーバー検証します。SMSは対応対象外です。
 
 ## Void / Cloudflare Email / React Email
 
@@ -157,9 +157,9 @@ AppleとGoogleの両方に有効契約がある場合は上位プランを採用
 
 実ストアの鍵・商品・Sandbox購入は未提供なので、実サービスへの購入・更新・返金試験は未実施です。実装テストではHTTP応答とストア検証の境界を差し替え、権利判定・紐付け・署名拒否・acknowledgeを確認しています。公開前に両ストアのテスト環境で購入・復元・猶予・失効・返金を確認してください。
 
-## 次期フェーズ: SMS
+## 対象外: SMS
 
-SMS対応は次期フェーズで検討します。事業者選定、電話番号の所有確認、受取同意、料金・文字分割数の上限、配信結果の照合を設計した上で実装します。初期フェーズでは設定を追加してもSMS送信は有効になりません。
+SMSは実装予定から外しました。宛先はメール、本人通知はメールとプッシュに限定します。設定追加によってSMS送信が有効になることはありません。
 
 既存DBのSMSレコードは保持しますが、監視の有効化・SMS招待の承諾を拒否し、公開生成時も保留します。未送信のSMS Outboxは配信処理で取り消します。メールへ自動変換しないため、利用者は宛先をメールとして登録し直して承諾を得る必要があります。
 

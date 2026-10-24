@@ -1,1 +1,0 @@
-ALTER TABLE `store_subscriptions` ADD `linked_reference_hash` text;
