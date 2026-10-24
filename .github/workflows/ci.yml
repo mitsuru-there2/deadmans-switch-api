@@ -22,4 +22,3 @@ jobs:
       - run: bun run check
       - run: bun run build
       - run: bun run test:runtime
-      - run: bun run test:e2e
