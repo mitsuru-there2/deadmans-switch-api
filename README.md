@@ -32,6 +32,12 @@ bun run test:runtime # 一時D1とVoid実workerdでメール確認・復旧・�
 
 `test:runtime` はローカルサーバーを一時起動し、React EmailのレンダリングとApple偽造署名の拒否も確認します。`bun run test:smoke` は起動済みの開発サーバーへ同じAPIフローを実行します。停止はCtrl+C。DBは保持されます。
 
+## DBマイグレーション
+
+未リリースのローカル環境のため、2026-10-24に履歴を初期マイグレーション1本へ再生成しました。既存の開発DBは `bunx void db reset --yes` でリセットしてから使用します。新規環境は従来どおり `bun run db:migrate` で作成できます。
+
+今後のスキーマ変更は `db/schema.ts` が公開するDrizzleスキーマを変更し、Void標準の `bun run db:generate` → SQL確認 → `bun run db:migrate` を使用します。詳細は[DB管理](docs/database.md)を参照してください。
+
 ## リポジトリ限定のVoidスキル
 
 公式 `bunx void init` で `AGENTS.md` と `.agents/skills/void`、`.agents/skills/migrate-vite-cloudflare-to-void` を導入しました。スキルはこのリポジトリの `node_modules/void/skills/` への相対リンクです。グローバルのスキル設定は変更していません。手順はインストール済みの `node_modules/void/docs/` を参照します。
